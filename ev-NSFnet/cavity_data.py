@@ -41,7 +41,7 @@ class DataLoader:
         Nx = 513
         Ny = 513
         dx = 1.0/(Nx-1)
-        r_const = 10
+        r_const = 50
 
         upper_x = np.linspace(self.x_min, self.x_max, num=Nx)
         u_upper = 1 -  np.cosh(r_const*(upper_x-0.5)) / np.cosh(r_const*0.5)
@@ -99,9 +99,11 @@ class DataLoader:
         y = data['Y_ref']
         u = data['U_ref']
         v = data['V_ref']
+        p = data['P_ref']
         x_star = x.reshape(-1,1)
         y_star = y.reshape(-1,1)
         u_star = u.reshape(-1,1)
         v_star = v.reshape(-1,1)
-        return x_star, y_star, u_star, v_star
+        p_star = p.reshape(-1,1)
+        return x_star, y_star, u_star, v_star, p_star
     

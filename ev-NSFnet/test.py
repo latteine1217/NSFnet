@@ -15,20 +15,22 @@
 # Author: Zhicheng Wang, Hui Xiang
 # Created: 08.03.2023
 import torch
+from train import setup_distributed, cleanup_distributed
 from tools import *
 import cavity_data as cavity
 import pinn_solver as psolver
+import csv
 
 
-def train(net_params=None, net_params_1=None, loop = 0):
-    Re = 5000   # Reynolds number
-    N_neu = 120
+def train(net_params=None, net_params_1=None, loop = 0, loss_record=None):
+    Re = 3000   # Reynolds number
+    N_neu = 80
     N_neu_1 = 40
     lam_bcs = 10
     lam_equ = 1
     N_f = 200000
     alpha_evm = 0.03
-    N_HLayer = 4
+    N_HLayer = 6
     N_HLayer_1 = 4
   #  layers = [2] + N_HLayer*[N_neu] + [4]
 
@@ -43,46 +45,53 @@ def train(net_params=None, net_params_1=None, loop = 0):
         eq_weight=lam_equ,
         net_params=net_params,
         net_params_1=net_params_1,
-        checkpoint_path='./checkpoint/')
+        checkpoint_path='./NSFnet/checkpoint/')
 
-    path = './datasets/'
+    path = './NSFnet/datasets/'
     dataloader = cavity.DataLoader(path=path, N_f=N_f, N_b=1000)
 
-    filename = './data/cavity_Re'+str(Re)+'_256_Uniform.mat'
-    x_star, y_star, u_star, v_star = dataloader.loading_evaluate_data(filename)
+    filename = './NSFnet/ev-NSFnet/data/cavity_Re'+str(Re)+'_256_Uniform.mat'
+    x_star, y_star, u_star, v_star, p_star = dataloader.loading_evaluate_data(filename)
 
     # Evaluating
-    PINN.evaluate(x_star, y_star, u_star, v_star)
-    PINN.test(x_star, y_star, u_star, v_star, loop)
+    PINN.evaluate(x_star, y_star, u_star, v_star, p_star)
+    PINN.test(x_star, y_star, u_star, v_star, p_star,  loop)
 
 if __name__ == "__main__":
-    
+    is_distributed = setup_distributed()
+    if not is_distributed:
+        # fallback 或設定成單 GPU 模式
+        os.environ['RANK'] = '0'
+        os.environ['LOCAL_RANK'] = '0'
+        os.environ['WORLD_SIZE'] = '1'
     for eid in range(0, 500000, 10000):
-       net_params = 'results/Re5000/4x120_Nf200k_lamB10_alpha0.05/model_cavity_loop%d.pth'%(eid)
-       net_params_1 = 'results/Re5000/4x120_Nf200k_lamB10_alpha0.05/model_cavity_loop%d.pth_evm'%(eid)
+       net_params = './results/Re5000/6x80_Nf120k_lamB10_alpha0.05Stage 1/model_cavity_loop%d.pth'%(eid)
+       net_params_1 = './results/Re5000/6x80_Nf120k_lamB10_alpha0.05Stage 1/model_cavity_loop%d.pth_evm'%(eid)
        train(net_params=net_params, net_params_1 = net_params_1, loop = eid)
 
     for eid in range(0, 500000, 10000):
-       net_params = 'results/Re5000/4x120_Nf200k_lamB10_alpha0.03/model_cavity_loop%d.pth'%(eid)
-       net_params_1 = 'results/Re5000/4x120_Nf200k_lamB10_alpha0.03/model_cavity_loop%d.pth_evm'%(eid)
+       net_params = './results/Re5000/6x80_Nf120k_lamB10_alpha0.03Stage 2/model_cavity_loop%d.pth'%(eid)
+       net_params_1 = './results/Re5000/6x80_Nf120k_lamB10_alpha0.03Stage 2/model_cavity_loop%d.pth_evm'%(eid)
        train(net_params=net_params, net_params_1 = net_params_1, loop = eid+500000)
        
     for eid in range(0, 500000, 10000):
-       net_params = 'results/Re5000/4x120_Nf200k_lamB10_alpha0.02/model_cavity_loop%d.pth'%(eid)
-       net_params_1 = 'results/Re5000/4x120_Nf200k_lamB10_alpha0.02/model_cavity_loop%d.pth_evm'%(eid)
+       net_params = './results/Re5000/6x80_Nf120k_lamB10_alpha0.01Stage 3/model_cavity_loop%d.pth'%(eid)
+       net_params_1 = './results/Re5000/6x80_Nf120k_lamB10_alpha0.01Stage 3/model_cavity_loop%d.pth_evm'%(eid)
        train(net_params=net_params, net_params_1 = net_params_1, loop = eid+1000000)
 
     for eid in range(0, 500000, 10000):
-       net_params = 'results/Re5000/4x120_Nf200k_lamB10_alpha0.01/model_cavity_loop%d.pth'%(eid)
-       net_params_1 = 'results/Re5000/4x120_Nf200k_lamB10_alpha0.01/model_cavity_loop%d.pth_evm'%(eid)
+       net_params = './results/Re5000/6x80_Nf120k_lamB10_alpha0.005Stage 4/model_cavity_loop%d.pth'%(eid)
+       net_params_1 = './results/Re5000/6x80_Nf120k_lamB10_alpha0.005Stage 4/model_cavity_loop%d.pth_evm'%(eid)
        train(net_params=net_params, net_params_1 = net_params_1, loop = eid+1500000)
 
     for eid in range(0, 500000, 10000):
-       net_params = 'results/Re5000/4x120_Nf200k_lamB10_alpha0.005/model_cavity_loop%d.pth'%(eid)
-       net_params_1 = 'results/Re5000/4x120_Nf200k_lamB10_alpha0.005/model_cavity_loop%d.pth_evm'%(eid)
+       net_params = './results/Re5000/6x80_Nf120k_lamB10_alpha0.002Stage 5/model_cavity_loop%d.pth'%(eid)
+       net_params_1 = './results/Re5000/6x80_Nf120k_lamB10_alpha0.002Stage 5/model_cavity_loop%d.pth_evm'%(eid)
        train(net_params=net_params, net_params_1 = net_params_1, loop = eid+2000000)
 
     for eid in range(0, 500000, 10000):
-       net_params = 'results/Re5000/4x120_Nf200k_lamB10_alpha0.002/model_cavity_loop%d.pth'%(eid)
-       net_params_1 = 'results/Re5000/4x120_Nf200k_lamB10_alpha0.002/model_cavity_loop%d.pth_evm'%(eid)
+       net_params = './results/Re5000/6x80_Nf120k_lamB10_alpha0.002Stage 6/model_cavity_loop%d.pth'%(eid)
+       net_params_1 = './results/Re5000/6x80_Nf120k_lamB10_alpha0.002Stage 6/model_cavity_loop%d.pth_evm'%(eid)
        train(net_params=net_params, net_params_1 = net_params_1, loop = eid+2500000)
+    if is_distributed:
+        cleanup_distributed()

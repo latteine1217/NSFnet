@@ -16,11 +16,12 @@
 # Created: 08.03.2023
 import os
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 import scipy.io
 import numpy as np
 from net import FCNet
 from typing import Dict, List, Set, Optional, Union, Callable
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 class PysicsInformedNeuralNetwork:
     # Initialize the class
@@ -36,9 +37,9 @@ class PysicsInformedNeuralNetwork:
                  learning_rate=0.001,
                  weight_decay=0.9,
                  outlet_weight=1,
-                 bc_weight=1,
+                 bc_weight=10,
                  eq_weight=1,
-                 ic_weight=1,
+                 ic_weight=0.1,
                  num_ins=2,
                  num_outs=3,
                  num_outs_1=1,
@@ -47,6 +48,15 @@ class PysicsInformedNeuralNetwork:
                  net_params_1=None,
                  checkpoint_freq=2000,
                  checkpoint_path='./checkpoint/'):
+
+        # Initialize distributed training
+        self.rank = int(os.environ.get('RANK', 0))
+        self.local_rank = int(os.environ.get('LOCAL_RANK', 0))
+        self.world_size = int(os.environ.get('WORLD_SIZE', 1))
+
+        # Set device for current process
+        self.device = torch.device(f'cuda:{self.local_rank}')
+        torch.cuda.set_device(self.local_rank)
 
         self.evm = None
         self.Re = Re
@@ -57,6 +67,7 @@ class PysicsInformedNeuralNetwork:
         self.hidden_size = hidden_size
         self.hidden_size_1 = hidden_size_1
         self.N_f = N_f
+        self.current_stage = ' '
 
         self.checkpoint_freq = checkpoint_freq
         self.checkpoint_path = checkpoint_path
@@ -71,44 +82,81 @@ class PysicsInformedNeuralNetwork:
 
         # initialize NN
         self.net = self.initialize_NN(
-                num_ins=num_ins, num_outs=num_outs, num_layers=layers, hidden_size=hidden_size).to(device)
+                num_ins=num_ins, num_outs=num_outs, num_layers=layers, hidden_size=hidden_size).to(self.device)
         self.net_1 = self.initialize_NN(
-                num_ins=num_ins, num_outs=num_outs_1, num_layers=layers_1, hidden_size=hidden_size_1).to(device)
+                num_ins=num_ins, num_outs=num_outs_1, num_layers=layers_1, hidden_size=hidden_size_1).to(self.device)
+
+        # Wrap models with DDP
+        self.net = DDP(self.net, device_ids=[self.local_rank], output_device=self.local_rank)
+        self.net_1 = DDP(self.net_1, device_ids=[self.local_rank], output_device=self.local_rank)
+
         if net_params:
-            load_params = torch.load(net_params)
-            self.net.load_state_dict(load_params)
+            if self.rank == 0:
+                print(f"Loading net params from {net_params}")
+            load_params = torch.load(net_params, map_location=self.device)
+            self.net.module.load_state_dict(load_params)
 
         if net_params_1:
-            load_params_1 = torch.load(net_params_1)
-            self.net_1.load_state_dict(load_params_1)
+            if self.rank == 0:
+                print(f"Loading net_1 params from {net_params_1}")
+            load_params_1 = torch.load(net_params_1, map_location=self.device)
+            self.net_1.module.load_state_dict(load_params_1)
+
+        # 初始化 vis_t 相關變數
+        self.vis_t = None
+        self.vis_t_minus = None
 
         self.opt = torch.optim.Adam(
             list(self.net.parameters())+list(self.net_1.parameters()),
             lr=learning_rate,
             weight_decay=0.0) if not opt else opt
 
+        if self.rank == 0:
+            print(f"Distributed training setup:")
+            print(f"  World size: {self.world_size}")
+            print(f"  Rank: {self.rank}")
+            print(f"  Local rank: {self.local_rank}")
+            print(f"  Device: {self.device}")
+
     def init_vis_t(self):
         (_,_,_,e) = self.neural_net_u(self.x_f, self.y_f)
-        self.vis_t_minus  = self.alpha_evm*torch.abs(e).detach().cpu().numpy()
+        self.vis_t_minus = self.alpha_evm*torch.abs(e).detach().cpu().numpy()
 
     def set_boundary_data(self, X=None, time=False):
-        # boundary training data | u, v, t, x, y
+        # Split boundary data across GPUs
+        total_points = X[0].shape[0]
+        points_per_gpu = total_points // self.world_size
+        start_idx = self.rank * points_per_gpu
+        end_idx = start_idx + points_per_gpu if self.rank < self.world_size - 1 else total_points
+
         requires_grad = False
-        self.x_b = torch.tensor(X[0], requires_grad=requires_grad).float().to(device)
-        self.y_b = torch.tensor(X[1], requires_grad=requires_grad).float().to(device)
-        self.u_b = torch.tensor(X[2], requires_grad=requires_grad).float().to(device)
-        self.v_b = torch.tensor(X[3], requires_grad=requires_grad).float().to(device)
+        self.x_b = torch.tensor(X[0][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+        self.y_b = torch.tensor(X[1][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+        self.u_b = torch.tensor(X[2][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+        self.v_b = torch.tensor(X[3][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
         if time:
-            self.t_b = torch.tensor(X[4], requires_grad=requires_grad).float().to(device)
+            self.t_b = torch.tensor(X[4][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+
+        if self.rank == 0:
+            print(f"GPU {self.rank}: Processing {end_idx - start_idx} boundary points out of {total_points} total")
 
     def set_eq_training_data(self,
                              X=None,
                              time=False):
+        # Split equation training data across GPUs
+        total_points = X[0].shape[0]
+        points_per_gpu = total_points // self.world_size
+        start_idx = self.rank * points_per_gpu
+        end_idx = start_idx + points_per_gpu if self.rank < self.world_size - 1 else total_points
+
         requires_grad = True
-        self.x_f = torch.tensor(X[0], requires_grad=requires_grad).float().to(device)
-        self.y_f = torch.tensor(X[1], requires_grad=requires_grad).float().to(device)
+        self.x_f = torch.tensor(X[0][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+        self.y_f = torch.tensor(X[1][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
         if time:
-            self.t_f = torch.tensor(X[2], requires_grad=requires_grad).float().to(device)
+            self.t_f = torch.tensor(X[2][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+
+        if self.rank == 0:
+            print(f"GPU {self.rank}: Processing {end_idx - start_idx} equation points out of {total_points} total")
 
         self.init_vis_t()
 
@@ -164,36 +212,34 @@ class PysicsInformedNeuralNetwork:
         p_x, p_y = self.autograd(p, [x,y])
 
         # Get the minum between (vis_t0, vis_t_mius(calculated with last step e))
-        self.vis_t = torch.tensor(
-                np.minimum(self.vis_t0, self.vis_t_minus)).float().to(device)
+        if self.vis_t_minus is not None:
+            self.vis_t = torch.tensor(
+                    np.minimum(self.vis_t0, self.vis_t_minus)).float().to(self.device)
+        else:
+            self.vis_t = torch.tensor(self.vis_t0).float().to(self.device)
+            
         # Save vis_t_minus for computing vis_t in the next step
-        self.vis_t_minus  = self.alpha_evm*torch.abs(e).detach().cpu().numpy()
+        self.vis_t_minus = self.alpha_evm*torch.abs(e).detach().cpu().numpy()
 
         # NS
         eq1 = (u*u_x + v*u_y) + p_x - (1.0/self.Re+self.vis_t)*(u_xx + u_yy)
         eq2 = (u*v_x + v*v_y) + p_y - (1.0/self.Re+self.vis_t)*(v_xx + v_yy)
-#        eq11 = (u*u_x + v*u_y) + p_x - 1.0/self.Re*(u_xx + u_yy)
-#        eq22 = (u*v_x + v*v_y) + p_y - 1.0/self.Re*(v_xx + v_yy)
         eq3 = u_x + v_y
 
         residual = (eq1*(u-0.5)+eq2*(v-0.5))-e
         return eq1, eq2, eq3, residual
 
-    @torch.jit.script
-    def autograd(y: torch.Tensor, x: List[torch.Tensor]) -> List[torch.Tensor]:
+    def autograd(self, y: torch.Tensor, x: List[torch.Tensor]) -> List[torch.Tensor]:
         """
-        TorchScript function to compute the gradient of a tensor wrt multople inputs
+        計算梯度的函數 (移除 @torch.jit.script 裝飾器)
         """
         grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(y, device=y.device)]
         grad = torch.autograd.grad(
-            [
-                y,
-            ],
+            [y],
             x,
             grad_outputs=grad_outputs,
             create_graph=True,
             allow_unused=True,
-            #retain_graph=True,
         )
 
         if grad is None:
@@ -216,28 +262,31 @@ class PysicsInformedNeuralNetwork:
         (self.u_pred_b, self.v_pred_b, _, _) = self.neural_net_u(self.x_b, self.y_b)
 
         # BC loss
-        if loss_mode == 'L2':
-            self.loss_b = torch.norm((self.u_b.reshape([-1]) - self.u_pred_b.reshape([-1])), p=2) + \
-                          torch.norm((self.v_b.reshape([-1]) - self.v_pred_b.reshape([-1])), p=2)
         if loss_mode == 'MSE':
-            self.loss_b = torch.mean(torch.square(self.u_b.reshape([-1]) - self.u_pred_b.reshape([-1]))) + \
-                          torch.mean(torch.square(self.v_b.reshape([-1]) - self.v_pred_b.reshape([-1])))
+                self.loss_b = torch.mean(torch.square(self.u_b.reshape([-1]) - self.u_pred_b.reshape([-1]))) + \
+                                torch.mean(torch.square(self.v_b.reshape([-1]) - self.v_pred_b.reshape([-1])))
 
         # equation
         assert self.x_f is not None and self.y_f is not None
 
-        (self.eq1_pred, self.eq2_pred,
-         self.eq3_pred, self.eq4_pred) = self.neural_net_equations(self.x_f, self.y_f)
-        if loss_mode == 'L2':
-            self.loss_e = torch.norm(self.eq1_pred.reshape([-1]), p=2) + \
-                          torch.norm(self.eq2_pred.reshape([-1]), p=2) + \
-                          torch.norm(self.eq3_pred.reshape([-1]), p=2)
+        (self.eq1_pred, self.eq2_pred, self.eq3_pred, self.eq4_pred) = self.neural_net_equations(self.x_f, self.y_f)
+    
         if loss_mode == 'MSE':
-            self.loss_eq1 = torch.mean(torch.square(self.eq1_pred.reshape([-1])))
-            self.loss_eq2 = torch.mean(torch.square(self.eq2_pred.reshape([-1])))
-            self.loss_eq3 = torch.mean(torch.square(self.eq3_pred.reshape([-1])))
-            self.loss_eq4 = torch.mean(torch.square(self.eq4_pred.reshape([-1])))
-            self.loss_e = self.loss_eq1+self.loss_eq2+self.loss_eq3 + 0.1*self.loss_eq4
+                self.loss_eq1 = torch.mean(torch.square(self.eq1_pred.reshape([-1])))
+                self.loss_eq2 = torch.mean(torch.square(self.eq2_pred.reshape([-1])))
+                self.loss_eq3 = torch.mean(torch.square(self.eq3_pred.reshape([-1])))
+                self.loss_eq4 = torch.mean(torch.square(self.eq4_pred.reshape([-1])))
+                self.loss_e = self.loss_eq1 + self.loss_eq2 + self.loss_eq3 + 0.1 * self.loss_eq4
+
+        # 跨GPU聚合損失以獲得全局損失值
+        if self.world_size > 1:
+                # 聚合邊界損失
+                dist.all_reduce(self.loss_b, op=dist.ReduceOp.SUM)
+                self.loss_b /= self.world_size
+        
+                # 聚合方程損失
+                dist.all_reduce(self.loss_e, op=dist.ReduceOp.SUM)
+                self.loss_e /= self.world_size
 
         self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e
 
@@ -253,62 +302,66 @@ class PysicsInformedNeuralNetwork:
             self.opt.param_groups[0]['lr'] = lr
         return self.solve_Adam(self.fwd_computing_loss_2d, num_epoch, batchsize, scheduler)
 
-    def solve_Adam(self,
-                   loss_func,
-                   num_epoch=1000,
-                   batchsize=None,
-                   scheduler=None):
+    def solve_Adam(self, loss_func, num_epoch=1000, batchsize=None, scheduler=None):
         self.freeze_evm_net(0)
+        
         for epoch_id in range(num_epoch):
             # train evm net every 10000 step
-            if epoch_id !=0 and epoch_id % 10000 == 0:
+            if epoch_id != 0 and epoch_id % 10000 == 0:
                 self.defreeze_evm_net(epoch_id)
             if (epoch_id - 1) % 10000 == 0:
                 self.freeze_evm_net(epoch_id)
 
+            # 計算損失
             loss, losses = loss_func()
-            loss.backward()
-            self.opt.step()
+            
+            # 反向傳播
             self.opt.zero_grad()
+            loss.backward()
+            
+            # 同步梯度 (DDP 會自動處理)
+            # 注意：DDP已經自動處理梯度同步，不需要手動 all_reduce
+            
+            # 更新參數
+            self.opt.step()
+            
             if scheduler:
                 scheduler.step()
 
-            if epoch_id == 0 or (epoch_id + 1)%100 == 0:
+            # 只在rank 0打印和保存
+            if self.rank == 0 and (epoch_id == 0 or (epoch_id + 1) % 100 == 0):
                 self.print_log(loss, losses, epoch_id, num_epoch)
 
-            if epoch_id == 0 or (epoch_id)%10000 == 0:
-                saved_ckpt = 'model_cavity_loop%d.pth'%(epoch_id)
+            if self.rank == 0 and (epoch_id == 0 or epoch_id % 10000 == 0):
+                saved_ckpt = 'model_cavity_loop%d.pth' % (epoch_id)
                 layers = self.layers
                 hidden_size = self.hidden_size
                 N_f = self.N_f
                 self.save(saved_ckpt, N_HLayer=layers, N_neu=hidden_size, N_f=N_f)
 
-            '''
-            if epoch_id % 1000 == 0:
-                print(epoch_id)
-                print(self.evm)
-            '''
-
     def freeze_evm_net(self, epoch_id):
-       # print("*"*20)
-       # print("freeze evm net")
-        #print(epoch_id)
-        #if self.evm is not None:
-        #    print(self.evm)
+        """凍結EVM網絡參數"""
         for para in self.net_1.parameters():
-            para.requires_grad = False
-        self.opt.param_groups[0]['params'] = list(self.net.parameters())
-       # print("*"*20)
+                para.requires_grad = False
+    
+        # 重新創建優化器只包含需要訓練的參數
+        self.opt = torch.optim.Adam(
+                [p for p in self.net.parameters() if p.requires_grad],
+                lr=self.opt.param_groups[0]['lr'],
+                weight_decay=0.0
+                )
 
     def defreeze_evm_net(self, epoch_id):
-       # print("*"*20)
-       # print("defreeze evm net")
-        #print(epoch_id)
-        #print(self.evm)
+        """解凍EVM網絡參數"""
         for para in self.net_1.parameters():
-            para.requires_grad = True
-        self.opt.param_groups[0]['params'] = list(self.net.parameters())+list(self.net_1.parameters())
-       # print("*"*20)
+                para.requires_grad = True
+    
+        # 重新創建優化器包含所有參數
+        self.opt = torch.optim.Adam(
+                list(self.net.parameters()) + list(self.net_1.parameters()),
+                lr=self.opt.param_groups[0]['lr'],
+                weight_decay=0.0
+                )
 
     def print_log(self, loss, losses, epoch_id, num_epoch):
         def get_lr(optimizer):
@@ -323,80 +376,87 @@ class PysicsInformedNeuralNetwork:
 
         print("epoch/num_epoch: ", epoch_id + 1, "/", num_epoch,
               "loss[Adam]: %.3e"
-              %(loss.detach().cpu().item()), 
+              %(loss.detach().cpu().item()),
               "eq1_loss: %.3e " %(self.loss_eq1.detach().cpu().item()),
               "eq2_loss: %.3e " %(self.loss_eq2.detach().cpu().item()),
               "eq3_loss: %.3e " %(self.loss_eq3.detach().cpu().item()),
               "eq4_loss: %.3e " %(self.loss_eq4.detach().cpu().item()),
-              "bc_loss: %.3e" %(losses[1].detach().cpu().item())) 
+              "bc_loss: %.3e" %(losses[1].detach().cpu().item()))
 
-        '''
-        if (epoch_id + 1) % self.checkpoint_freq == 0:
-            torch.save(
-                self.net.state_dict(),
-                self.checkpoint_path + 'net_params_' + str(epoch_id + 1) + '.pth')
-        '''
-
-    def evaluate(self, x, y, u, v):
+    def evaluate(self, x, y, u, v, p):
         """ testing all points in the domain """
         x_test = x.reshape(-1,1)
         y_test = y.reshape(-1,1)
         u_test = u.reshape(-1,1)
         v_test = v.reshape(-1,1)
+        p_test = p.reshape(-1,1)
 
-        x_test = torch.tensor(x_test).float().to(device)
-        y_test = torch.tensor(y_test).float().to(device)
-        u_pred, v_pred, _, _= self.neural_net_u(x_test, y_test)
+        x_test = torch.tensor(x_test).float().to(self.device)
+        y_test = torch.tensor(y_test).float().to(self.device)
+        u_pred, v_pred, p_pred, _= self.neural_net_u(x_test, y_test)
         u_pred = u_pred.detach().cpu().numpy().reshape(-1,1)
         v_pred = v_pred.detach().cpu().numpy().reshape(-1,1)
+        p_pred = p_pred.detach().cpu().numpy().reshape(-1,1)
+        
+        mask_p = ~np.isnan(p_test)
         # Error
-        error_u = np.linalg.norm(u_test-u_pred,2)/np.linalg.norm(u_test,2)
-        error_v = np.linalg.norm(v_test-v_pred,2)/np.linalg.norm(v_test,2)
-        print('------------------------')
-        print('Error u: %e' % (error_u))
-        print('Error v: %e' % (error_v))
+        error_u = 100*np.linalg.norm(u_test-u_pred,2)/np.linalg.norm(u_test,2)
+        error_v = 100*np.linalg.norm(v_test-v_pred,2)/np.linalg.norm(v_test,2)
+        error_p = 100*np.linalg.norm(p_test[mask_p]-p_pred[mask_p], 2) / np.linalg.norm(p_test[mask_p], 2)
+        if self.rank == 0:
+            print('------------------------')
+            print('Error u: %.2f %%' % (error_u))
+            print('Error v: %.2f %%' % (error_v))
+            print('Error p: %.2f %%' % (error_p))
 
-    def test(self, x, y, u, v,loop=None):
+    def test(self, x, y, u, v, p, loop=None):
         """ testing all points in the domain """
         x_test = x.reshape(-1,1)
         y_test = y.reshape(-1,1)
         u_test = u.reshape(-1,1)
         v_test = v.reshape(-1,1)
+        p_test = p.reshape(-1,1)
         # Prediction
-        x_test = torch.tensor(x_test).float().to(device)
-        y_test = torch.tensor(y_test).float().to(device)
+        x_test = torch.tensor(x_test).float().to(self.device)
+        y_test = torch.tensor(y_test).float().to(self.device)
         u_pred, v_pred, p_pred, e_pred= self.neural_net_u(x_test, y_test)
         u_pred = u_pred.detach().cpu().numpy().reshape(-1,1)
         v_pred = v_pred.detach().cpu().numpy().reshape(-1,1)
         p_pred = p_pred.detach().cpu().numpy().reshape(-1,1)
         e_pred = e_pred.detach().cpu().numpy().reshape(-1,1)
+        
+        mask_p = ~np.isnan(p_test)
         # Error
-        error_u = np.linalg.norm(u_test-u_pred,2)/np.linalg.norm(u_test,2)
-        error_v = np.linalg.norm(v_test-v_pred,2)/np.linalg.norm(v_test,2)
-        print('------------------------')
-        print('Error u: %e' % (error_u))
-        print('Error v: %e' % (error_v))
-        print('------------------------')
+        error_u = 100*np.linalg.norm(u_test-u_pred,2)/np.linalg.norm(u_test,2)
+        error_v = 100*np.linalg.norm(v_test-v_pred,2)/np.linalg.norm(v_test,2)
+        error_p = 100*np.linalg.norm(p_test[mask_p]-p_pred[mask_p], 2) / np.linalg.norm(p_test[mask_p], 2)
+        if self.rank == 0:
+            print('------------------------')
+            print('Error u: %.3f %%' % (error_u))
+            print('Error v: %.3f %%' % (error_v))
+            print('Error p: %.3f %%' % (error_p))
+            print('------------------------')
 
-#        div_pred = self.divergence(x_test, y_test)
-        u_pred = u_pred.reshape(257,257)
-        v_pred = v_pred.reshape(257,257)
-        p_pred = p_pred.reshape(257,257)
-        e_pred = e_pred.reshape(257,257)
-#        div_pred = div_pred.detach().cpu().numpy().reshape(257,257)
+            u_pred = u_pred.reshape(257,257)
+            v_pred = v_pred.reshape(257,257)
+            p_pred = p_pred.reshape(257,257)
+            e_pred = e_pred.reshape(257,257)
 
-        scipy.io.savemat('cavity_result_loop_%d.mat'%(loop),
-                    {'U_pred':u_pred,
-                     'V_pred':v_pred,
-                     'P_pred':p_pred,
-                     'E_pred':e_pred,
-                     'lam_bcs':self.alpha_b,
-                     'lam_equ':self.alpha_e})
+            scipy.io.savemat('./NSFnet/ev-NSFnet/results/Re5000/test_result/cavity_result_loop_%d.mat'%(loop),
+                        {'U_pred':u_pred,
+                         'V_pred':v_pred,
+                         'P_pred':p_pred,
+                         'E_pred':e_pred,
+                         'error_u':error_u,
+                         'error_v':error_v,
+                         'error_p':error_p,
+                         'lam_bcs':self.alpha_b,
+                         'lam_equ':self.alpha_e})
 
     def save(self, filename, directory=None, N_HLayer=None, N_neu=None, N_f=None):
         Re_folder = 'Re'+str(self.Re)
         NNsize = str(N_HLayer) + 'x' + str(N_neu) + '_Nf'+str(np.int32(N_f/1000)) + 'k'
-        lambdas = 'lamB'+str(self.alpha_b) + '_alpha'+str(self.alpha_evm)
+        lambdas = 'lamB'+str(self.alpha_b) + '_alpha'+str(self.alpha_evm) + str(self.current_stage)
 
         relative_path = '/results/' +  Re_folder + '/' + NNsize + '_' + lambdas + '/'
 
@@ -405,13 +465,13 @@ class PysicsInformedNeuralNetwork:
         save_results_to = directory + relative_path
         if not os.path.exists(save_results_to):
             os.makedirs(save_results_to)
-        
-        torch.save(self.net.state_dict(), save_results_to+filename)
-        torch.save(self.net_1.state_dict(), save_results_to+filename+'_evm')
 
+        # Save model state dict without DDP wrapper
+        torch.save(self.net.module.state_dict(), save_results_to+filename)
+        torch.save(self.net_1.module.state_dict(), save_results_to+filename+'_evm')
 
     def divergence(self, x_star, y_star):
         (self.eq1_pred, self.eq2_pred,
-         self.eq3_pred, self.eq4_pred) = self.neural_net_equations(self.x_star, self.y_star)
+         self.eq3_pred, self.eq4_pred) = self.neural_net_equations(x_star, y_star)
         div = self.eq3_pred
         return div
