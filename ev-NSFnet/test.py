@@ -23,7 +23,7 @@ import csv
 
 
 def train(net_params=None, net_params_1=None, loop = 0, loss_record=None):
-    Re = 3000   # Reynolds number
+    Re = 5000   # Reynolds number
     N_neu = 80
     N_neu_1 = 40
     lam_bcs = 10
