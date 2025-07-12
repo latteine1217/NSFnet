@@ -1,0 +1,51 @@
+defaults:
+  - _self_
+
+# Model configuration
+reynolds_number: 5000
+alpha_evm: 0.03
+alpha_boundary: 10.0
+alpha_equation: 1.0
+alpha_evm_constraint: 0.1
+
+# Network architectures
+main_net:
+  nr_layers: 6
+  layer_size: 80
+  activation_fn: "tanh"
+
+evm_net:
+  nr_layers: 4
+  layer_size: 40
+  activation_fn: "tanh"
+
+# Data configuration
+data_dir: "./data"
+num_interior_points: 120000
+num_boundary_points: 1000
+
+# Training configuration
+optimizer:
+  lr: 1e-3
+  weight_decay: 0.0
+
+scheduler:
+  enabled: false
+  gamma: 0.95
+
+# Logging and checkpointing
+log_freq: 100
+checkpoint_freq: 10000
+checkpoint_dir: "./checkpoints"
+checkpoint_path: null
+
+# Distributed training
+distributed:
+  backend: "nccl"
+
+# Hydra configuration
+hydra:
+  run:
+    dir: ./outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: false
