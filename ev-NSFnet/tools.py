@@ -23,7 +23,6 @@ Created on Fri Mar 25 17:00:36 2022
 
 import math
 import numpy as np
-import matplotlib.pyplot as plt
 
 
 
@@ -71,7 +70,7 @@ def sort_pts(pts1, pts2, flag_reverse=False):
     for pt in pts1:
         minDists.append( minDistance(pt, pts2) )
     minDists = np.array(minDists).reshape(1,-1)
-    
+
     dists_sorted = np.sort(minDists).reshape(-1,1)
     sort_index = np.argsort(minDists)
     if flag_reverse:
@@ -81,13 +80,3 @@ def sort_pts(pts1, pts2, flag_reverse=False):
     pts1_sorted = pts1[sort_index,:]
     pts1_sorted = np.squeeze(pts1_sorted)
     return pts1_sorted, dists_sorted
-
-
-   
-    
-    
-    
-    
-    
-    
-    

@@ -14,13 +14,10 @@
 #
 # Author: Zhicheng Wang, Hui Xiang
 # Created: 08.03.2023
-import torch
 from train import setup_distributed, cleanup_distributed
-from tools import *
 import cavity_data as cavity
 import pinn_solver as psolver
-import csv
-
+import os
 
 def train(net_params=None, net_params_1=None, loop = 0, loss_record=None):
     Re = 5000   # Reynolds number
@@ -73,7 +70,7 @@ if __name__ == "__main__":
        net_params = './results/Re5000/6x80_Nf120k_lamB10_alpha0.03Stage 2/model_cavity_loop%d.pth'%(eid)
        net_params_1 = './results/Re5000/6x80_Nf120k_lamB10_alpha0.03Stage 2/model_cavity_loop%d.pth_evm'%(eid)
        train(net_params=net_params, net_params_1 = net_params_1, loop = eid+500000)
-       
+
     for eid in range(0, 500000, 10000):
        net_params = './results/Re5000/6x80_Nf120k_lamB10_alpha0.01Stage 3/model_cavity_loop%d.pth'%(eid)
        net_params_1 = './results/Re5000/6x80_Nf120k_lamB10_alpha0.01Stage 3/model_cavity_loop%d.pth_evm'%(eid)

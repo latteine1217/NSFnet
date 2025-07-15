@@ -21,7 +21,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import scipy.io
 import numpy as np
 from net import FCNet
-from typing import Dict, List, Set, Optional, Union, Callable
+from typing import List, Optional
 
 class PysicsInformedNeuralNetwork:
     # Initialize the class
@@ -112,7 +112,7 @@ class PysicsInformedNeuralNetwork:
             weight_decay=0.0) if not opt else opt
 
         if self.rank == 0:
-            print(f"Distributed training setup:")
+            print("Distributed training setup:")
             print(f"  World size: {self.world_size}")
             print(f"  Rank: {self.rank}")
             print(f"  Local rank: {self.local_rank}")
@@ -217,7 +217,7 @@ class PysicsInformedNeuralNetwork:
                     np.minimum(self.vis_t0, self.vis_t_minus)).float().to(self.device)
         else:
             self.vis_t = torch.tensor(self.vis_t0).float().to(self.device)
-            
+
         # Save vis_t_minus for computing vis_t in the next step
         self.vis_t_minus = self.alpha_evm*torch.abs(e).detach().cpu().numpy()
 
@@ -254,7 +254,6 @@ class PysicsInformedNeuralNetwork:
 
     def shuffle(self, tensor):
         tensor_to_numpy = tensor.detach().cpu()
-        shuffle_numpy = np.random.shuffle(tensor_to_numpy)
         return torch.tensor(tensor_to_numpy, requires_grad=True).float()
 
     def fwd_computing_loss_2d(self, loss_mode='MSE'):
@@ -270,7 +269,7 @@ class PysicsInformedNeuralNetwork:
         assert self.x_f is not None and self.y_f is not None
 
         (self.eq1_pred, self.eq2_pred, self.eq3_pred, self.eq4_pred) = self.neural_net_equations(self.x_f, self.y_f)
-    
+
         if loss_mode == 'MSE':
                 self.loss_eq1 = torch.mean(torch.square(self.eq1_pred.reshape([-1])))
                 self.loss_eq2 = torch.mean(torch.square(self.eq2_pred.reshape([-1])))
@@ -283,7 +282,7 @@ class PysicsInformedNeuralNetwork:
                 # 聚合邊界損失
                 dist.all_reduce(self.loss_b, op=dist.ReduceOp.SUM)
                 self.loss_b /= self.world_size
-        
+
                 # 聚合方程損失
                 dist.all_reduce(self.loss_e, op=dist.ReduceOp.SUM)
                 self.loss_e /= self.world_size
@@ -304,7 +303,7 @@ class PysicsInformedNeuralNetwork:
 
     def solve_Adam(self, loss_func, num_epoch=1000, batchsize=None, scheduler=None):
         self.freeze_evm_net(0)
-        
+
         for epoch_id in range(num_epoch):
             # train evm net every 10000 step
             if epoch_id != 0 and epoch_id % 10000 == 0:
@@ -314,17 +313,17 @@ class PysicsInformedNeuralNetwork:
 
             # 計算損失
             loss, losses = loss_func()
-            
+
             # 反向傳播
             self.opt.zero_grad()
             loss.backward()
-            
+
             # 同步梯度 (DDP 會自動處理)
             # 注意：DDP已經自動處理梯度同步，不需要手動 all_reduce
-            
+
             # 更新參數
             self.opt.step()
-            
+
             if scheduler:
                 scheduler.step()
 
@@ -343,7 +342,7 @@ class PysicsInformedNeuralNetwork:
         """凍結EVM網絡參數"""
         for para in self.net_1.parameters():
                 para.requires_grad = False
-    
+
         # 重新創建優化器只包含需要訓練的參數
         self.opt = torch.optim.Adam(
                 [p for p in self.net.parameters() if p.requires_grad],
@@ -355,7 +354,7 @@ class PysicsInformedNeuralNetwork:
         """解凍EVM網絡參數"""
         for para in self.net_1.parameters():
                 para.requires_grad = True
-    
+
         # 重新創建優化器包含所有參數
         self.opt = torch.optim.Adam(
                 list(self.net.parameters()) + list(self.net_1.parameters()),
@@ -369,10 +368,6 @@ class PysicsInformedNeuralNetwork:
                 return param_group['lr']
 
         print("current lr is {}".format(get_lr(self.opt)))
-        if isinstance(losses[0], int):
-            eq_loss = losses[0]
-        else:
-            eq_loss = losses[0].detach().cpu().item()
 
         print("epoch/num_epoch: ", epoch_id + 1, "/", num_epoch,
               "loss[Adam]: %.3e"
@@ -397,7 +392,7 @@ class PysicsInformedNeuralNetwork:
         u_pred = u_pred.detach().cpu().numpy().reshape(-1,1)
         v_pred = v_pred.detach().cpu().numpy().reshape(-1,1)
         p_pred = p_pred.detach().cpu().numpy().reshape(-1,1)
-        
+
         mask_p = ~np.isnan(p_test)
         # Error
         error_u = 100*np.linalg.norm(u_test-u_pred,2)/np.linalg.norm(u_test,2)
@@ -424,7 +419,7 @@ class PysicsInformedNeuralNetwork:
         v_pred = v_pred.detach().cpu().numpy().reshape(-1,1)
         p_pred = p_pred.detach().cpu().numpy().reshape(-1,1)
         e_pred = e_pred.detach().cpu().numpy().reshape(-1,1)
-        
+
         mask_p = ~np.isnan(p_test)
         # Error
         error_u = 100*np.linalg.norm(u_test-u_pred,2)/np.linalg.norm(u_test,2)
