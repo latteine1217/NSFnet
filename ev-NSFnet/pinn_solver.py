@@ -86,21 +86,31 @@ class PysicsInformedNeuralNetwork:
         self.net_1 = self.initialize_NN(
                 num_ins=num_ins, num_outs=num_outs_1, num_layers=layers_1, hidden_size=hidden_size_1).to(self.device)
 
-        # Wrap models with DDP
-        self.net = DDP(self.net, device_ids=[self.local_rank], output_device=self.local_rank)
-        self.net_1 = DDP(self.net_1, device_ids=[self.local_rank], output_device=self.local_rank)
+        # Wrap models with DDP only if distributed training is initialized
+        if dist.is_initialized() and self.world_size > 1:
+            self.net = DDP(self.net, device_ids=[self.local_rank], output_device=self.local_rank)
+            self.net_1 = DDP(self.net_1, device_ids=[self.local_rank], output_device=self.local_rank)
+            self.is_ddp = True
+        else:
+            self.is_ddp = False
 
         if net_params:
             if self.rank == 0:
                 print(f"Loading net params from {net_params}")
             load_params = torch.load(net_params, map_location=self.device)
-            self.net.module.load_state_dict(load_params)
+            if self.is_ddp:
+                self.net.module.load_state_dict(load_params)
+            else:
+                self.net.load_state_dict(load_params)
 
         if net_params_1:
             if self.rank == 0:
                 print(f"Loading net_1 params from {net_params_1}")
             load_params_1 = torch.load(net_params_1, map_location=self.device)
-            self.net_1.module.load_state_dict(load_params_1)
+            if self.is_ddp:
+                self.net_1.module.load_state_dict(load_params_1)
+            else:
+                self.net_1.load_state_dict(load_params_1)
 
         # 初始化 vis_t 相關變數
         self.vis_t = None
@@ -277,19 +287,44 @@ class PysicsInformedNeuralNetwork:
                 self.loss_eq4 = torch.mean(torch.square(self.eq4_pred.reshape([-1])))
                 self.loss_e = self.loss_eq1 + self.loss_eq2 + self.loss_eq3 + 0.1 * self.loss_eq4
 
-        # 跨GPU聚合損失以獲得全局損失值
-        if self.world_size > 1:
-                # 聚合邊界損失
-                dist.all_reduce(self.loss_b, op=dist.ReduceOp.SUM)
-                self.loss_b /= self.world_size
-
-                # 聚合方程損失
-                dist.all_reduce(self.loss_e, op=dist.ReduceOp.SUM)
-                self.loss_e /= self.world_size
+        # DDP會自動處理梯度同步，不需要手動聚合損失tensor
+        # 只有在需要顯示損失時才進行聚合（detach後）
+        display_loss_b = self.loss_b.detach().clone()
+        display_loss_e = self.loss_e.detach().clone()
+        display_loss_eq1 = self.loss_eq1.detach().clone()
+        display_loss_eq2 = self.loss_eq2.detach().clone() 
+        display_loss_eq3 = self.loss_eq3.detach().clone()
+        display_loss_eq4 = self.loss_eq4.detach().clone()
+        
+        if self.world_size > 1 and dist.is_initialized():
+            # 聚合用於顯示的損失（已detach，不影響梯度）
+            dist.all_reduce(display_loss_b, op=dist.ReduceOp.SUM)
+            display_loss_b /= self.world_size
+            
+            dist.all_reduce(display_loss_e, op=dist.ReduceOp.SUM) 
+            display_loss_e /= self.world_size
+            
+            dist.all_reduce(display_loss_eq1, op=dist.ReduceOp.SUM)
+            display_loss_eq1 /= self.world_size
+            
+            dist.all_reduce(display_loss_eq2, op=dist.ReduceOp.SUM)
+            display_loss_eq2 /= self.world_size
+            
+            dist.all_reduce(display_loss_eq3, op=dist.ReduceOp.SUM)
+            display_loss_eq3 /= self.world_size
+            
+            dist.all_reduce(display_loss_eq4, op=dist.ReduceOp.SUM)
+            display_loss_eq4 /= self.world_size
+            
+        # 將聚合後的損失存回，供顯示使用
+        self.display_loss_eq1 = display_loss_eq1
+        self.display_loss_eq2 = display_loss_eq2
+        self.display_loss_eq3 = display_loss_eq3
+        self.display_loss_eq4 = display_loss_eq4
 
         self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e
 
-        return self.loss, [self.loss_e, self.loss_b]
+        return self.loss, [display_loss_e, display_loss_b]
 
     def train(self,
               num_epoch=1,
@@ -372,11 +407,11 @@ class PysicsInformedNeuralNetwork:
         print("epoch/num_epoch: ", epoch_id + 1, "/", num_epoch,
               "loss[Adam]: %.3e"
               %(loss.detach().cpu().item()),
-              "eq1_loss: %.3e " %(self.loss_eq1.detach().cpu().item()),
-              "eq2_loss: %.3e " %(self.loss_eq2.detach().cpu().item()),
-              "eq3_loss: %.3e " %(self.loss_eq3.detach().cpu().item()),
-              "eq4_loss: %.3e " %(self.loss_eq4.detach().cpu().item()),
-              "bc_loss: %.3e" %(losses[1].detach().cpu().item()))
+              "eq1_loss: %.3e " %(self.display_loss_eq1.cpu().item()),
+              "eq2_loss: %.3e " %(self.display_loss_eq2.cpu().item()),
+              "eq3_loss: %.3e " %(self.display_loss_eq3.cpu().item()),
+              "eq4_loss: %.3e " %(self.display_loss_eq4.cpu().item()),
+              "bc_loss: %.3e" %(losses[1].cpu().item()))
 
     def evaluate(self, x, y, u, v, p):
         """ testing all points in the domain """
@@ -462,8 +497,12 @@ class PysicsInformedNeuralNetwork:
             os.makedirs(save_results_to)
 
         # Save model state dict without DDP wrapper
-        torch.save(self.net.module.state_dict(), save_results_to+filename)
-        torch.save(self.net_1.module.state_dict(), save_results_to+filename+'_evm')
+        if self.is_ddp:
+            torch.save(self.net.module.state_dict(), save_results_to+filename)
+            torch.save(self.net_1.module.state_dict(), save_results_to+filename+'_evm')
+        else:
+            torch.save(self.net.state_dict(), save_results_to+filename)
+            torch.save(self.net_1.state_dict(), save_results_to+filename+'_evm')
 
     def divergence(self, x_star, y_star):
         (self.eq1_pred, self.eq2_pred,

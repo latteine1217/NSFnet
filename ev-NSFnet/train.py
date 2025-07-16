@@ -67,7 +67,7 @@ def train(net_params=None):
         lam_bcs = 10
         lam_equ = 1
         N_f = 120000
-        alpha_evm = 0.03
+        alpha_evm = 0.05
         N_HLayer = 6
         N_HLayer_1 = 4
 
