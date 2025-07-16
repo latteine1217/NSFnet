@@ -95,7 +95,7 @@ def train(net_params=None):
         training_data = dataloader.loading_training_data()
         PINN.set_eq_training_data(X=training_data)
 
-        filename = './NSFnet/ev-NSFnet/data/cavity_Re'+str(Re)+'_256_Uniform.mat'
+        filename = './data/cavity_Re'+str(Re)+'_256_Uniform.mat'
         x_star, y_star, u_star, v_star, p_star = dataloader.loading_evaluate_data(filename)
 
         # Training stages with different alpha_evm values
