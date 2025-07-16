@@ -81,11 +81,9 @@ def train(net_params=None):
             alpha_evm=alpha_evm,
             bc_weight=lam_bcs,
             eq_weight=lam_equ,
-            net_params=net_params,
-            checkpoint_path='./checkpoint/')
+            net_params=net_params)
 
-        path = './datasets/'
-        dataloader = cavity.DataLoader(path=path, N_f=N_f, N_b=1000)
+        dataloader = cavity.DataLoader(N_f=N_f, N_b=1000)
 
         # Set boundary data, | u, v, x, y
         boundary_data = dataloader.loading_boundary_data()

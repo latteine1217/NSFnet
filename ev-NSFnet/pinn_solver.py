@@ -45,9 +45,7 @@ class PysicsInformedNeuralNetwork:
                  num_outs_1=1,
                  supervised_data_weight=1,
                  net_params=None,
-                 net_params_1=None,
-                 checkpoint_freq=2000,
-                 checkpoint_path='./checkpoint/'):
+                 net_params_1=None):
 
         # Initialize distributed training
         self.rank = int(os.environ.get('RANK', 0))
@@ -68,9 +66,6 @@ class PysicsInformedNeuralNetwork:
         self.hidden_size_1 = hidden_size_1
         self.N_f = N_f
         self.current_stage = ' '
-
-        self.checkpoint_freq = checkpoint_freq
-        self.checkpoint_path = checkpoint_path
 
         self.alpha_evm = alpha_evm
         self.alpha_b = bc_weight

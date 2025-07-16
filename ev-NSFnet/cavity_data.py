@@ -20,7 +20,7 @@ from tools import LHSample, sort_pts
 
 
 class DataLoader:
-    def __init__(self, path=None, N_f=20000, N_b=1000):
+    def __init__(self, N_f=20000, N_b=1000):
 
         '''
         N_f: Num of residual points

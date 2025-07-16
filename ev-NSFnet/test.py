@@ -41,13 +41,11 @@ def train(net_params=None, net_params_1=None, loop = 0, loss_record=None):
         bc_weight=lam_bcs,
         eq_weight=lam_equ,
         net_params=net_params,
-        net_params_1=net_params_1,
-        checkpoint_path='./NSFnet/checkpoint/')
+        net_params_1=net_params_1)
 
-    path = './NSFnet/datasets/'
-    dataloader = cavity.DataLoader(path=path, N_f=N_f, N_b=1000)
+    dataloader = cavity.DataLoader(N_f=N_f, N_b=1000)
 
-    filename = './NSFnet/ev-NSFnet/data/cavity_Re'+str(Re)+'_256_Uniform.mat'
+    filename = './data/cavity_Re'+str(Re)+'_256_Uniform.mat'
     x_star, y_star, u_star, v_star, p_star = dataloader.loading_evaluate_data(filename)
 
     # Evaluating
