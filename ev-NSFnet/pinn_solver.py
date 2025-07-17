@@ -195,6 +195,7 @@ class PysicsInformedNeuralNetwork:
         e =  ee[:,0:1]
         return u, v, p, e
 
+
     def neural_net_equations(self, x, y):
         X = torch.cat((x, y), dim=1)
         uvp = self.net(X)
@@ -287,30 +288,30 @@ class PysicsInformedNeuralNetwork:
         display_loss_b = self.loss_b.detach().clone()
         display_loss_e = self.loss_e.detach().clone()
         display_loss_eq1 = self.loss_eq1.detach().clone()
-        display_loss_eq2 = self.loss_eq2.detach().clone() 
+        display_loss_eq2 = self.loss_eq2.detach().clone()
         display_loss_eq3 = self.loss_eq3.detach().clone()
         display_loss_eq4 = self.loss_eq4.detach().clone()
-        
+
         if self.world_size > 1 and dist.is_initialized():
             # 聚合用於顯示的損失（已detach，不影響梯度）
             dist.all_reduce(display_loss_b, op=dist.ReduceOp.SUM)
             display_loss_b /= self.world_size
-            
-            dist.all_reduce(display_loss_e, op=dist.ReduceOp.SUM) 
+
+            dist.all_reduce(display_loss_e, op=dist.ReduceOp.SUM)
             display_loss_e /= self.world_size
-            
+
             dist.all_reduce(display_loss_eq1, op=dist.ReduceOp.SUM)
             display_loss_eq1 /= self.world_size
-            
+
             dist.all_reduce(display_loss_eq2, op=dist.ReduceOp.SUM)
             display_loss_eq2 /= self.world_size
-            
+
             dist.all_reduce(display_loss_eq3, op=dist.ReduceOp.SUM)
             display_loss_eq3 /= self.world_size
-            
+
             dist.all_reduce(display_loss_eq4, op=dist.ReduceOp.SUM)
             display_loss_eq4 /= self.world_size
-            
+
         # 將聚合後的損失存回，供顯示使用
         self.display_loss_eq1 = display_loss_eq1
         self.display_loss_eq2 = display_loss_eq2
@@ -500,6 +501,8 @@ class PysicsInformedNeuralNetwork:
             torch.save(self.net_1.state_dict(), save_results_to+filename+'_evm')
 
     def divergence(self, x_star, y_star):
+        x_star.requires_grad = True
+        y_star.requires_grad = True
         (self.eq1_pred, self.eq2_pred,
          self.eq3_pred, self.eq4_pred) = self.neural_net_equations(x_star, y_star)
         div = self.eq3_pred
