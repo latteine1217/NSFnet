@@ -33,6 +33,7 @@ class PysicsInformedNeuralNetwork:
                  hidden_size=80,
                  hidden_size_1=20,
                  N_f = 100000,
+                 batch_size = None,
                  alpha_evm=0.03,
                  learning_rate=0.001,
                  weight_decay=0.9,
@@ -67,6 +68,7 @@ class PysicsInformedNeuralNetwork:
         self.hidden_size = hidden_size
         self.hidden_size_1 = hidden_size_1
         self.N_f = N_f
+        self.batch_size = batch_size if batch_size is not None else N_f
         self.current_stage = ' '
 
         self.checkpoint_freq = checkpoint_freq
@@ -322,6 +324,29 @@ class PysicsInformedNeuralNetwork:
     def solve_Adam(self, loss_func, num_epoch=1000, batchsize=None, scheduler=None):
         self.freeze_evm_net(0)
         
+        # 如果指定了 batchsize，使用批次訓練
+        if batchsize is not None:
+            self.batch_size = batchsize
+            
+        # 確定實際使用的批次大小
+        actual_batch_size = self.batch_size
+        
+        # 計算每個epoch需要的步數
+        if actual_batch_size < self.N_f:
+            steps_per_epoch = (self.N_f + actual_batch_size - 1) // actual_batch_size
+        else:
+            steps_per_epoch = 1
+            actual_batch_size = self.N_f
+        
+        if self.rank == 0:
+            print(f"=== Training Configuration ===")
+            print(f"Total training points (N_f): {self.N_f}")
+            print(f"Batch size: {actual_batch_size}")
+            print(f"Steps per epoch: {steps_per_epoch}")
+            print(f"Coverage: 100% per epoch (Cyclic Sampling)")
+            print(f"Total epochs: {num_epoch}")
+            print("=" * 30)
+        
         for epoch_id in range(num_epoch):
             # train evm net every 10000 step
             if epoch_id != 0 and epoch_id % 10000 == 0:
@@ -329,25 +354,64 @@ class PysicsInformedNeuralNetwork:
             if (epoch_id - 1) % 10000 == 0:
                 self.freeze_evm_net(epoch_id)
 
-            # 計算損失
-            loss, losses = loss_func()
+            # 保存原始數據
+            original_x_f = self.x_f.clone()
+            original_y_f = self.y_f.clone()
             
-            # 反向傳播
-            self.opt.zero_grad()
-            loss.backward()
+            # Epoch間數據洗牌 - 每5個epoch洗牌一次
+            if epoch_id > 0 and epoch_id % 5 == 0:
+                shuffle_indices = torch.randperm(self.N_f)
+                original_x_f = original_x_f[shuffle_indices]
+                original_y_f = original_y_f[shuffle_indices]
+                if self.rank == 0:
+                    print(f"[Epoch {epoch_id}] Data shuffled for better convergence")
+
+            epoch_loss = 0.0
+            epoch_losses = None
             
-            # 同步梯度 (DDP 會自動處理)
-            # 注意：DDP已經自動處理梯度同步，不需要手動 all_reduce
+            # 循環覆蓋採樣 - 批次訓練循環
+            for step in range(steps_per_epoch):
+                # 計算當前批次的索引範圍
+                start_idx = step * actual_batch_size
+                end_idx = min(start_idx + actual_batch_size, self.N_f)
+                current_batch_size = end_idx - start_idx
+                
+                # 使用循環覆蓋採樣
+                if actual_batch_size < self.N_f:
+                    self.x_f = original_x_f[start_idx:end_idx]
+                    self.y_f = original_y_f[start_idx:end_idx]
+                
+                # 計算損失
+                loss, losses = loss_func()
+                
+                # 反向傳播
+                self.opt.zero_grad()
+                loss.backward()
+                self.opt.step()
+                
+                epoch_loss += loss.item()
+                if epoch_losses is None:
+                    epoch_losses = [l.item() if hasattr(l, 'item') else l for l in losses]
+                else:
+                    for i, l in enumerate(losses):
+                        epoch_losses[i] += (l.item() if hasattr(l, 'item') else l)
+                
+                # 在每個step後恢復原始數據大小以備下次使用
+                if actual_batch_size < self.N_f:
+                    self.x_f = original_x_f
+                    self.y_f = original_y_f
             
-            # 更新參數
-            self.opt.step()
+            # 計算平均損失
+            epoch_loss /= steps_per_epoch
+            for i in range(len(epoch_losses)):
+                epoch_losses[i] /= steps_per_epoch
             
             if scheduler:
                 scheduler.step()
 
             # 只在rank 0打印和保存
             if self.rank == 0 and (epoch_id == 0 or (epoch_id + 1) % 100 == 0):
-                self.print_log(loss, losses, epoch_id, num_epoch)
+                self.print_log_batch(epoch_loss, epoch_losses, epoch_id, num_epoch, actual_batch_size, steps_per_epoch)
 
             if self.rank == 0 and (epoch_id == 0 or epoch_id % 10000 == 0):
                 saved_ckpt = 'model_cavity_loop%d.pth' % (epoch_id)
@@ -379,6 +443,21 @@ class PysicsInformedNeuralNetwork:
                 lr=self.opt.param_groups[0]['lr'],
                 weight_decay=0.0
                 )
+
+    def print_log_batch(self, loss, losses, epoch_id, num_epoch, batch_size, steps_per_epoch):
+        def get_lr(optimizer):
+            for param_group in optimizer.param_groups:
+                return param_group['lr']
+
+        coverage_percent = 100.0  # 循環覆蓋確保100%覆蓋
+        print("current lr is {}".format(get_lr(self.opt)))
+        print("epoch/num_epoch: ", epoch_id + 1, "/", num_epoch,
+              "batch_size:", batch_size,
+              "steps/epoch:", steps_per_epoch,
+              "coverage: {:.1f}%".format(coverage_percent),
+              "avg_loss[Adam]: %.3e" %(loss),
+              "avg_eq1_loss: %.3e " %(losses[0] if len(losses) > 0 else 0),
+              "avg_bc_loss: %.3e" %(losses[1] if len(losses) > 1 else 0))
 
     def print_log(self, loss, losses, epoch_id, num_epoch):
         def get_lr(optimizer):
