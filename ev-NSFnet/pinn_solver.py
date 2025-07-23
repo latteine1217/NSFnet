@@ -212,11 +212,28 @@ class PysicsInformedNeuralNetwork:
         p_x, p_y = self.autograd(p, [x,y])
 
         # Get the minum between (vis_t0, vis_t_mius(calculated with last step e))
+        batch_size = x.shape[0]
         if self.vis_t_minus is not None:
+            # 確保 vis_t_minus 的形狀匹配當前批次大小
+            if self.vis_t_minus.shape[0] != batch_size:
+                # 如果尺寸不匹配，使用 vis_t0 填充或截斷
+                if self.vis_t_minus.shape[0] > batch_size:
+                    vis_t_minus_batch = self.vis_t_minus[:batch_size]
+                else:
+                    # 重複填充到當前批次大小
+                    repeat_times = (batch_size + self.vis_t_minus.shape[0] - 1) // self.vis_t_minus.shape[0]
+                    vis_t_minus_extended = np.tile(self.vis_t_minus, (repeat_times, 1))
+                    vis_t_minus_batch = vis_t_minus_extended[:batch_size]
+            else:
+                vis_t_minus_batch = self.vis_t_minus
+            
+            vis_t0_batch = np.full_like(vis_t_minus_batch, self.vis_t0)
             self.vis_t = torch.tensor(
-                    np.minimum(self.vis_t0, self.vis_t_minus)).float().to(self.device)
+                    np.minimum(vis_t0_batch, vis_t_minus_batch)).float().to(self.device)
         else:
-            self.vis_t = torch.tensor(self.vis_t0).float().to(self.device)
+            # 創建與批次大小匹配的 vis_t0 張量
+            vis_t0_batch = np.full((batch_size, 1), self.vis_t0)
+            self.vis_t = torch.tensor(vis_t0_batch).float().to(self.device)
             
         # Save vis_t_minus for computing vis_t in the next step
         self.vis_t_minus = self.alpha_evm*torch.abs(e).detach().cpu().numpy()
