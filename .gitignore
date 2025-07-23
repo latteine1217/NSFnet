@@ -1,3 +1,8 @@
-__pycahe__/
+ev-NSFnet/__pycahe__/
 .DS_Store
 .csv
+.err
+.out
+ev-NSFnet/results
+ev-NSFnet/runs
+ev-NSFnet/profiler_logs
