@@ -312,6 +312,7 @@ class PysicsInformedNeuralNetwork:
             x,
             grad_outputs=grad_outputs,
             create_graph=True,
+            retain_graph=True,
             allow_unused=True,
         )
 
