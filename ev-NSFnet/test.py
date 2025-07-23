@@ -44,9 +44,7 @@ def train(net_params=None, net_params_1=None, loop = 0, loss_record=None):
         bc_weight=lam_bcs,
         eq_weight=lam_equ,
         net_params=net_params,
-        net_params_1=net_params_1,
-        checkpoint_path='./NSFnet/checkpoint/')
-
+        net_params_1=net_params_1)
     path = './NSFnet/datasets/'
     dataloader = cavity.DataLoader(path=path, N_f=N_f, N_b=1000)
 

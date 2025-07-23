@@ -79,8 +79,7 @@ class DistributedBatchEfficiencyTester:
             alpha_evm=alpha_evm,
             bc_weight=lam_bcs,
             eq_weight=lam_equ,
-            N_f=120000,
-            checkpoint_path='./test_checkpoint/')
+            N_f=120000)
         
         return pinn
         

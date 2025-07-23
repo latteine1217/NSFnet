@@ -22,6 +22,10 @@ import scipy.io
 import numpy as np
 from net import FCNet
 from typing import Dict, List, Set, Optional, Union, Callable
+import warnings
+
+# 抑制 PyTorch 分散式訓練的 autograd 警告
+warnings.filterwarnings("ignore", message=".*c10d::allreduce_.*autograd kernel.*")
 
 class PysicsInformedNeuralNetwork:
     # Initialize the class
@@ -47,8 +51,7 @@ class PysicsInformedNeuralNetwork:
                  supervised_data_weight=1,
                  net_params=None,
                  net_params_1=None,
-                 checkpoint_freq=2000,
-                 checkpoint_path='./checkpoint/'):
+                 checkpoint_freq=2000):
 
         # Initialize distributed training
         self.rank = int(os.environ.get('RANK', 0))
@@ -72,7 +75,6 @@ class PysicsInformedNeuralNetwork:
         self.current_stage = ' '
 
         self.checkpoint_freq = checkpoint_freq
-        self.checkpoint_path = checkpoint_path
 
         self.alpha_evm = alpha_evm
         self.alpha_b = bc_weight
@@ -215,7 +217,7 @@ class PysicsInformedNeuralNetwork:
 
         # Get the minum between (vis_t0, vis_t_mius(calculated with last step e))
         batch_size = x.shape[0]
-        if self.vis_t_minus is not None:
+        if self.vis_t_minus is not None and self.vis_t_minus.shape[0] > 0:
             # 確保 vis_t_minus 的形狀匹配當前批次大小
             if self.vis_t_minus.shape[0] != batch_size:
                 # 如果尺寸不匹配，使用 vis_t0 填充或截斷
@@ -223,9 +225,13 @@ class PysicsInformedNeuralNetwork:
                     vis_t_minus_batch = self.vis_t_minus[:batch_size]
                 else:
                     # 重複填充到當前批次大小
-                    repeat_times = (batch_size + self.vis_t_minus.shape[0] - 1) // self.vis_t_minus.shape[0]
-                    vis_t_minus_extended = np.tile(self.vis_t_minus, (repeat_times, 1))
-                    vis_t_minus_batch = vis_t_minus_extended[:batch_size]
+                    if self.vis_t_minus.shape[0] > 0:
+                        repeat_times = (batch_size + self.vis_t_minus.shape[0] - 1) // self.vis_t_minus.shape[0]
+                        vis_t_minus_extended = np.tile(self.vis_t_minus, (repeat_times, 1))
+                        vis_t_minus_batch = vis_t_minus_extended[:batch_size]
+                    else:
+                        # 如果 vis_t_minus 為空，直接使用 vis_t0
+                        vis_t_minus_batch = np.full((batch_size, 1), self.vis_t0)
             else:
                 vis_t_minus_batch = self.vis_t_minus
             
@@ -299,17 +305,30 @@ class PysicsInformedNeuralNetwork:
 
         # 跨GPU聚合損失以獲得全局損失值
         if self.world_size > 1:
-                # 聚合邊界損失
-                dist.all_reduce(self.loss_b, op=dist.ReduceOp.SUM)
-                self.loss_b /= self.world_size
-        
-                # 聚合方程損失
-                dist.all_reduce(self.loss_e, op=dist.ReduceOp.SUM)
-                self.loss_e /= self.world_size
+            # 聚合邊界損失 - 使用 detach() 避免 autograd 警告
+            loss_b_detached = self.loss_b.detach().clone()
+            dist.all_reduce(loss_b_detached, op=dist.ReduceOp.SUM)
+            loss_b_avg = loss_b_detached / self.world_size
+            
+            # 聚合方程損失 - 使用 detach() 避免 autograd 警告  
+            loss_e_detached = self.loss_e.detach().clone()
+            dist.all_reduce(loss_e_detached, op=dist.ReduceOp.SUM)
+            loss_e_avg = loss_e_detached / self.world_size
+            
+            # 重新計算總損失，保持梯度追踪
+            self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e
+            
+            # 用於日誌顯示的平均損失
+            self.loss_b_avg = loss_b_avg
+            self.loss_e_avg = loss_e_avg
+        else:
+            self.loss_b_avg = self.loss_b
+            self.loss_e_avg = self.loss_e
 
         self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e
 
-        return self.loss, [self.loss_e, self.loss_b]
+        return self.loss, [self.loss_e_avg if hasattr(self, 'loss_e_avg') else self.loss_e, 
+                          self.loss_b_avg if hasattr(self, 'loss_b_avg') else self.loss_b]
 
     def train(self,
               num_epoch=1,

@@ -6,6 +6,11 @@ from torch.utils.data import TensorDataset, DataLoader, DistributedSampler
 from tools import *
 import cavity_data as cavity
 import pinn_solver as psolver
+import warnings
+
+# 抑制 PyTorch 分散式訓練相關警告
+warnings.filterwarnings("ignore", message=".*c10d::allreduce_.*autograd kernel.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="torch.autograd")
 
 
 def setup_distributed():
@@ -85,8 +90,7 @@ def train(net_params=None):
             alpha_evm=alpha_evm,
             bc_weight=lam_bcs,
             eq_weight=lam_equ,
-            net_params=net_params,
-            checkpoint_path='./checkpoint/')
+            net_params=net_params)
 
         path = './datasets/'
         dataloader = cavity.DataLoader(path=path, N_f=N_f, N_b=1000)
