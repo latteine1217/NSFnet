@@ -129,17 +129,47 @@ class PysicsInformedNeuralNetwork:
     def set_boundary_data(self, X=None, time=False):
         # Split boundary data across GPUs
         total_points = X[0].shape[0]
-        points_per_gpu = total_points // self.world_size
-        start_idx = self.rank * points_per_gpu
-        end_idx = start_idx + points_per_gpu if self.rank < self.world_size - 1 else total_points
+        
+        # 確保每個GPU至少有一些數據點
+        if total_points < self.world_size:
+            if self.rank == 0:
+                print(f"WARNING: Only {total_points} boundary points for {self.world_size} GPUs")
+            # 如果數據點少於GPU數量，只有部分GPU處理數據
+            if self.rank < total_points:
+                start_idx = self.rank
+                end_idx = self.rank + 1
+            else:
+                # 沒有數據的GPU使用空張量
+                start_idx = 0
+                end_idx = 0
+        else:
+            points_per_gpu = total_points // self.world_size
+            start_idx = self.rank * points_per_gpu
+            end_idx = start_idx + points_per_gpu if self.rank < self.world_size - 1 else total_points
 
+        # 檢查索引邊界
+        start_idx = max(0, min(start_idx, total_points))
+        end_idx = max(start_idx, min(end_idx, total_points))
+        
         requires_grad = False
-        self.x_b = torch.tensor(X[0][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
-        self.y_b = torch.tensor(X[1][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
-        self.u_b = torch.tensor(X[2][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
-        self.v_b = torch.tensor(X[3][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+        
+        # 如果沒有數據點，創建空張量
+        if start_idx >= end_idx:
+            self.x_b = torch.empty(0, 1, requires_grad=requires_grad).float().to(self.device)
+            self.y_b = torch.empty(0, 1, requires_grad=requires_grad).float().to(self.device)
+            self.u_b = torch.empty(0, 1, requires_grad=requires_grad).float().to(self.device)
+            self.v_b = torch.empty(0, 1, requires_grad=requires_grad).float().to(self.device)
+        else:
+            self.x_b = torch.tensor(X[0][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+            self.y_b = torch.tensor(X[1][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+            self.u_b = torch.tensor(X[2][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+            self.v_b = torch.tensor(X[3][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+            
         if time:
-            self.t_b = torch.tensor(X[4][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+            if start_idx >= end_idx:
+                self.t_b = torch.empty(0, 1, requires_grad=requires_grad).float().to(self.device)
+            else:
+                self.t_b = torch.tensor(X[4][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
 
         if self.rank == 0:
             print(f"GPU {self.rank}: Processing {end_idx - start_idx} boundary points out of {total_points} total")
@@ -149,9 +179,27 @@ class PysicsInformedNeuralNetwork:
                              time=False):
         # Split equation training data across GPUs
         total_points = X[0].shape[0]
-        points_per_gpu = total_points // self.world_size
-        start_idx = self.rank * points_per_gpu
-        end_idx = start_idx + points_per_gpu if self.rank < self.world_size - 1 else total_points
+        
+        # 確保每個GPU至少有一些數據點
+        if total_points < self.world_size:
+            if self.rank == 0:
+                print(f"WARNING: Only {total_points} training points for {self.world_size} GPUs")
+            # 如果數據點少於GPU數量，只有部分GPU處理數據
+            if self.rank < total_points:
+                start_idx = self.rank
+                end_idx = self.rank + 1
+            else:
+                # 沒有數據的GPU使用最小集合
+                start_idx = 0
+                end_idx = 1
+        else:
+            points_per_gpu = total_points // self.world_size
+            start_idx = self.rank * points_per_gpu
+            end_idx = start_idx + points_per_gpu if self.rank < self.world_size - 1 else total_points
+
+        # 檢查索引邊界
+        start_idx = max(0, min(start_idx, total_points))
+        end_idx = max(start_idx + 1, min(end_idx, total_points))  # 確保至少有1個點
 
         requires_grad = True
         self.x_f = torch.tensor(X[0][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
@@ -286,10 +334,30 @@ class PysicsInformedNeuralNetwork:
         # boundary data
         (self.u_pred_b, self.v_pred_b, _, _) = self.neural_net_u(self.x_b, self.y_b)
 
-        # BC loss
+        # BC loss - 處理空邊界數據的情況
         if loss_mode == 'MSE':
-                self.loss_b = torch.mean(torch.square(self.u_b.reshape([-1]) - self.u_pred_b.reshape([-1]))) + \
-                                torch.mean(torch.square(self.v_b.reshape([-1]) - self.v_pred_b.reshape([-1])))
+            if self.x_b.shape[0] > 0:  # 檢查是否有邊界數據
+                # 確保張量形狀匹配
+                u_b_flat = self.u_b.view(-1)
+                v_b_flat = self.v_b.view(-1)
+                u_pred_b_flat = self.u_pred_b.view(-1)
+                v_pred_b_flat = self.v_pred_b.view(-1)
+                
+                # 檢查張量大小是否匹配
+                if u_b_flat.shape[0] != u_pred_b_flat.shape[0]:
+                    print(f"ERROR: Boundary tensor size mismatch: {u_b_flat.shape} vs {u_pred_b_flat.shape}")
+                    # 使用較小的尺寸
+                    min_size = min(u_b_flat.shape[0], u_pred_b_flat.shape[0])
+                    u_b_flat = u_b_flat[:min_size]
+                    v_b_flat = v_b_flat[:min_size]
+                    u_pred_b_flat = u_pred_b_flat[:min_size]
+                    v_pred_b_flat = v_pred_b_flat[:min_size]
+                
+                self.loss_b = torch.mean(torch.square(u_b_flat - u_pred_b_flat)) + \
+                              torch.mean(torch.square(v_b_flat - v_pred_b_flat))
+            else:
+                # 沒有邊界數據時設置損失為0
+                self.loss_b = torch.tensor(0.0, device=self.device, requires_grad=True)
 
         # equation
         assert self.x_f is not None and self.y_f is not None
@@ -297,11 +365,11 @@ class PysicsInformedNeuralNetwork:
         (self.eq1_pred, self.eq2_pred, self.eq3_pred, self.eq4_pred) = self.neural_net_equations(self.x_f, self.y_f)
     
         if loss_mode == 'MSE':
-                self.loss_eq1 = torch.mean(torch.square(self.eq1_pred.reshape([-1])))
-                self.loss_eq2 = torch.mean(torch.square(self.eq2_pred.reshape([-1])))
-                self.loss_eq3 = torch.mean(torch.square(self.eq3_pred.reshape([-1])))
-                self.loss_eq4 = torch.mean(torch.square(self.eq4_pred.reshape([-1])))
-                self.loss_e = self.loss_eq1 + self.loss_eq2 + self.loss_eq3 + 0.1 * self.loss_eq4
+            self.loss_eq1 = torch.mean(torch.square(self.eq1_pred.view(-1)))
+            self.loss_eq2 = torch.mean(torch.square(self.eq2_pred.view(-1)))
+            self.loss_eq3 = torch.mean(torch.square(self.eq3_pred.view(-1)))
+            self.loss_eq4 = torch.mean(torch.square(self.eq4_pred.view(-1)))
+            self.loss_e = self.loss_eq1 + self.loss_eq2 + self.loss_eq3 + 0.1 * self.loss_eq4
 
         # 跨GPU聚合損失以獲得全局損失值
         if self.world_size > 1:
@@ -350,16 +418,20 @@ class PysicsInformedNeuralNetwork:
         # 確定實際使用的批次大小
         actual_batch_size = self.batch_size
         
+        # 獲取實際數據點數量（每個GPU載入的點數）
+        actual_data_points = self.x_f.shape[0]
+        
         # 計算每個epoch需要的步數
-        if actual_batch_size < self.N_f:
-            steps_per_epoch = (self.N_f + actual_batch_size - 1) // actual_batch_size
+        if actual_batch_size < actual_data_points:
+            steps_per_epoch = (actual_data_points + actual_batch_size - 1) // actual_batch_size
         else:
             steps_per_epoch = 1
-            actual_batch_size = self.N_f
+            actual_batch_size = actual_data_points
         
         if self.rank == 0:
             print(f"=== Training Configuration ===")
             print(f"Total training points (N_f): {self.N_f}")
+            print(f"Actual GPU data points: {actual_data_points}")
             print(f"Batch size: {actual_batch_size}")
             print(f"Steps per epoch: {steps_per_epoch}")
             print(f"Coverage: 100% per epoch (Cyclic Sampling)")
@@ -373,17 +445,20 @@ class PysicsInformedNeuralNetwork:
             if (epoch_id - 1) % 10000 == 0:
                 self.freeze_evm_net(epoch_id)
 
-            # 保存原始數據
+            # 重新載入原始數據（在每個epoch開始時重置）
             original_x_f = self.x_f.clone()
             original_y_f = self.y_f.clone()
+            actual_data_points = original_x_f.shape[0]
             
             # Epoch間數據洗牌 - 每5個epoch洗牌一次
             if epoch_id > 0 and epoch_id % 5 == 0:
-                shuffle_indices = torch.randperm(self.N_f)
+                # 使用實際載入的數據點數量，而不是總數據點數量
+                actual_points = original_x_f.shape[0]
+                shuffle_indices = torch.randperm(actual_points)
                 original_x_f = original_x_f[shuffle_indices]
                 original_y_f = original_y_f[shuffle_indices]
                 if self.rank == 0:
-                    print(f"[Epoch {epoch_id}] Data shuffled for better convergence")
+                    print(f"[Epoch {epoch_id}] Data shuffled for better convergence (points: {actual_points})")
 
             epoch_loss = 0.0
             epoch_losses = None
@@ -392,13 +467,31 @@ class PysicsInformedNeuralNetwork:
             for step in range(steps_per_epoch):
                 # 計算當前批次的索引範圍
                 start_idx = step * actual_batch_size
-                end_idx = min(start_idx + actual_batch_size, self.N_f)
+                end_idx = min(start_idx + actual_batch_size, actual_data_points)
                 current_batch_size = end_idx - start_idx
                 
+                # 檢查索引邊界
+                if start_idx >= actual_data_points:
+                    print(f"WARNING: start_idx {start_idx} >= actual_data_points {actual_data_points}")
+                    break
+                
                 # 使用循環覆蓋採樣
-                if actual_batch_size < self.N_f:
+                if actual_batch_size < actual_data_points:
+                    # 檢查切片邊界
+                    if end_idx > original_x_f.shape[0]:
+                        print(f"ERROR: end_idx {end_idx} > data size {original_x_f.shape[0]}")
+                        end_idx = original_x_f.shape[0]
+                        if start_idx >= end_idx:
+                            print(f"ERROR: Invalid slice range [{start_idx}:{end_idx}]")
+                            break
+                    
                     self.x_f = original_x_f[start_idx:end_idx]
                     self.y_f = original_y_f[start_idx:end_idx]
+                    
+                    # 檢查批次數據是否有效
+                    if self.x_f.shape[0] == 0:
+                        print(f"ERROR: Empty batch at step {step}")
+                        break
                 
                 # 計算損失
                 loss, losses = loss_func()
@@ -416,7 +509,7 @@ class PysicsInformedNeuralNetwork:
                         epoch_losses[i] += (l.item() if hasattr(l, 'item') else l)
                 
                 # 在每個step後恢復原始數據大小以備下次使用
-                if actual_batch_size < self.N_f:
+                if actual_batch_size < actual_data_points:
                     self.x_f = original_x_f
                     self.y_f = original_y_f
             
