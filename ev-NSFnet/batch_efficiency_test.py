@@ -69,6 +69,7 @@ class DistributedBatchEfficiencyTester:
         N_HLayer = 6
         N_HLayer_1 = 4
         
+        # PINN已內建DDP支援，無需額外包裝
         pinn = psolver.PysicsInformedNeuralNetwork(
             Re=Re,
             layers=N_HLayer,
@@ -167,6 +168,10 @@ class DistributedBatchEfficiencyTester:
             x_f, y_f, x_b, y_b, u_b, v_b, batch_size
         )
         
+        # 創建迭代器（提升效率）
+        eq_iter = iter(eq_loader)
+        bc_iter = iter(bc_loader)
+        
         # 性能監控變量
         step_times = []
         all_gpu_memory = []
@@ -187,8 +192,15 @@ class DistributedBatchEfficiencyTester:
             step_start = time.time()
             
             # 獲取批次數據
-            eq_batch = next(iter(eq_loader))
-            bc_batch = next(iter(bc_loader))
+            try:
+                eq_batch = next(eq_iter)
+                bc_batch = next(bc_iter)
+            except StopIteration:
+                # 重新開始新的epoch
+                eq_iter = iter(eq_loader)
+                bc_iter = iter(bc_loader)
+                eq_batch = next(eq_iter)
+                bc_batch = next(bc_iter)
             
             # 設置批次數據到模型
             x_f_batch = eq_batch[0].cuda(non_blocking=True)
@@ -209,12 +221,10 @@ class DistributedBatchEfficiencyTester:
             # 前向傳播和反向傳播
             pinn.opt.zero_grad()
             loss, loss_components = pinn.fwd_computing_loss_2d()
-            loss.backward()
+            loss.backward()  # DDP自動進行梯度同步
             pinn.opt.step()
             
-            # 同步計時
-            if self.is_distributed:
-                dist.barrier()
+            # 只在必要時同步
             torch.cuda.synchronize()
             
             step_end = time.time()
