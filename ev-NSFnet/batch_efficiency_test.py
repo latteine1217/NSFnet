@@ -85,7 +85,7 @@ class DistributedBatchEfficiencyTester:
         
     def prepare_data(self, N_f=120000, N_b=1000):
         """準備訓練數據"""
-        path = './datasets/'
+        path = './data/'
         dataloader = cavity.DataLoader(path=path, N_f=N_f, N_b=N_b)
         
         boundary_data = dataloader.loading_boundary_data()

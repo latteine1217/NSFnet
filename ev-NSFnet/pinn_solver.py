@@ -432,7 +432,7 @@ class PysicsInformedNeuralNetwork:
             if self.rank == 0 and (epoch_id == 0 or (epoch_id + 1) % 100 == 0):
                 self.print_log_batch(epoch_loss, epoch_losses, epoch_id, num_epoch, actual_batch_size, steps_per_epoch)
 
-            if self.rank == 0 and (epoch_id == 0 or epoch_id % 10000 == 0):
+            if self.rank == 0 and (epoch_id == 0 or epoch_id % self.checkpoint_freq == 0):
                 saved_ckpt = 'model_cavity_loop%d.pth' % (epoch_id)
                 layers = self.layers
                 hidden_size = self.hidden_size
