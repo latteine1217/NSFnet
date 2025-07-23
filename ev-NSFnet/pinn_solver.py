@@ -312,7 +312,7 @@ class PysicsInformedNeuralNetwork:
             x,
             grad_outputs=grad_outputs,
             create_graph=True,
-            retain_graph=True,
+            retain_graph=False,
             allow_unused=True,
         )
 
@@ -499,7 +499,7 @@ class PysicsInformedNeuralNetwork:
                 
                 # 反向傳播
                 self.opt.zero_grad()
-                loss.backward()
+                loss.backward(retain_graph=False)
                 self.opt.step()
                 
                 epoch_loss += loss.item()
