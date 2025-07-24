@@ -32,6 +32,24 @@ from logger import LoggerFactory, PINNLogger
 from health_monitor import TrainingHealthMonitor, HealthThresholds
 from memory_manager import TrainingMemoryManager
 
+# 針對舊GPU (CUDA capability < 7.0) 的torch.compile相容性設置
+if torch.cuda.is_available():
+    device_capability = torch.cuda.get_device_capability(0)  # 檢查主GPU
+    major, minor = device_capability
+    cuda_capability = major + minor * 0.1
+    
+    if cuda_capability < 7.0:
+        # 設置環境變數以避免Triton編譯器錯誤
+        os.environ.setdefault('TORCH_COMPILE_BACKEND', 'eager')
+        os.environ.setdefault('TORCHDYNAMO_DISABLE', '1')
+        
+        # 抑制torch.compile相關錯誤
+        try:
+            import torch._dynamo
+            torch._dynamo.config.suppress_errors = True
+        except ImportError:
+            pass
+
 # 抑制 PyTorch 分散式訓練的 autograd 警告
 warnings.filterwarnings("ignore", message=".*c10d::allreduce_.*autograd kernel.*")
 
@@ -153,16 +171,30 @@ class PysicsInformedNeuralNetwork:
         self.net_1 = self.initialize_NN(
                 num_ins=num_ins, num_outs=num_outs_1, num_layers=layers_1, hidden_size=hidden_size_1).to(self.device)
 
-        # 優化：使用torch.compile加速網路推理 (PyTorch 2.x)
+        # 優化：使用torch.compile加速網路推理 (僅支援CUDA capability >= 7.0)
         if hasattr(torch, 'compile') and torch.__version__ >= "2.0":
             try:
-                self.net = torch.compile(self.net, mode='reduce-overhead')
-                self.net_1 = torch.compile(self.net_1, mode='reduce-overhead')
-                if self.rank == 0:
-                    self.logger.info("🚀 啟用 torch.compile 優化")
+                # 檢查CUDA capability是否支援Triton編譯器
+                if torch.cuda.is_available():
+                    device_capability = torch.cuda.get_device_capability(self.local_rank)
+                    major, minor = device_capability
+                    cuda_capability = major + minor * 0.1
+                    
+                    if cuda_capability >= 7.0:
+                        self.net = torch.compile(self.net, mode='reduce-overhead')
+                        self.net_1 = torch.compile(self.net_1, mode='reduce-overhead')
+                        if self.rank == 0:
+                            self.logger.info(f"🚀 啟用 torch.compile 優化 (CUDA capability: {cuda_capability})")
+                    else:
+                        if self.rank == 0:
+                            self.logger.warning(f"⚠️ 跳過 torch.compile 優化 - GPU CUDA capability {cuda_capability} < 7.0 (不支援Triton)")
+                            self.logger.info("   使用標準PyTorch eager模式訓練")
+                else:
+                    if self.rank == 0:
+                        self.logger.info("CPU模式，跳過torch.compile優化")
             except Exception as e:
                 if self.rank == 0:
-                    self.logger.warning(f"torch.compile 優化失敗: {e}")
+                    self.logger.warning(f"torch.compile 檢查失敗，使用eager模式: {e}")
 
         # 確保所有張量使用 float32 精度
         self.net = self.net.float()

@@ -10,6 +10,12 @@
 ## 硬體環境規則
 本專案使用Dell R740伺服器運行（Intel Xeon Gold 5118 12 Core*2/ 48 threads, 112GB memory, Nvidia P100 16GB *2）。請根據此硬體配置來審查以及設計錯誤解決方式。不要使用本地python做執行測試，需要測試的檔案請寫好後讓我自己手動運行。
 
+### Tesla P100 相容性注意事項
+- GPU CUDA Capability: 6.0 (不支援Triton編譯器)
+- PyTorch 2.x的torch.compile功能需要CUDA capability >= 7.0
+- 專案已配置自動檢測並回退到eager模式以確保相容性
+- 環境變數設置：TORCH_COMPILE_BACKEND=eager, TORCHDYNAMO_DISABLE=1
+
 ## 訓練腳本規則
 本專案使用train.sh為訓練腳本，伺服器採用SLURM作業管理系統。請參考現有的SLURM配置方式：
 - 使用SBATCH配置作業參數
@@ -26,6 +32,7 @@
 ## Commands
 - **Train**: `python train.py` (main training script)
 - **Test**: `python test.py` (evaluation script)
+- **P100 Compatibility Test**: `python test_p100_compatibility.py` (hardware compatibility check)
 - **Single test**: No specific command - modify test.py loop ranges
 - **Dependencies**: PyTorch, NumPy, SciPy, Matplotlib (no package manager config found)
 
