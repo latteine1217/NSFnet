@@ -164,6 +164,10 @@ class PysicsInformedNeuralNetwork:
                 if self.rank == 0:
                     self.logger.warning(f"torch.compile 優化失敗: {e}")
 
+        # 確保所有張量使用 float32 精度
+        self.net = self.net.float()
+        self.net_1 = self.net_1.float()
+
         # 優化：初始化vis_t相關變數，避免重複檢查
         self.vis_t_minus_gpu = None  # GPU版本的vis_t_minus
 
@@ -630,13 +634,6 @@ class PysicsInformedNeuralNetwork:
         # 使用完整數據進行訓練（不使用批次處理）
         actual_data_points = self.x_f.shape[0]
         
-        # 優化：啟用混合精度訓練 (自動選擇)
-        use_amp = torch.cuda.is_available() and hasattr(torch.cuda, 'amp')
-        if use_amp:
-            scaler = torch.cuda.amp.GradScaler()
-            if self.rank == 0:
-                self.logger.info("🚀 啟用混合精度訓練 (AMP)")
-        
         # 記錄階段開始時間和啟動健康監控
         if self.rank == 0:
             self.stage_start_time = time.time()
@@ -661,7 +658,7 @@ class PysicsInformedNeuralNetwork:
                 "訓練模式": "全批次 (無DataLoader)",
                 "總epochs": f"{num_epoch:,}",
                 "DDP模式": "啟用" if self.world_size > 1 else "關閉",
-                "混合精度": "啟用" if use_amp else "關閉"
+                "數值精度": "Float32 (完整精度)"
             }
             self.logger.info("=== 訓練配置 (全批次) ===")
             for key, value in training_info.items():
@@ -691,23 +688,16 @@ class PysicsInformedNeuralNetwork:
             # 清除上一個epoch的梯度
             self.opt.zero_grad()
 
-            # 優化：使用混合精度或標準精度
-            if use_amp:
-                with torch.cuda.amp.autocast():
-                    loss, losses = loss_func()
-            else:
-                loss, losses = loss_func()
+            # 使用標準float32精度進行計算
+            loss, losses = loss_func()
             
             # 損失值驗證和GPU記憶體檢查
             if not self.validate_loss_and_memory(loss, losses, epoch_id):
                 self.logger.critical(f"Critical error at epoch {epoch_id}, stopping training...")
                 return
             
-            # 優化：使用混合精度的梯度回傳
-            if use_amp:
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
+            # 標準精度梯度回傳
+            loss.backward()
             
             # 記錄損失值
             epoch_loss = loss.detach().item()
@@ -720,17 +710,10 @@ class PysicsInformedNeuralNetwork:
             del loss
             
             # 梯度裁剪避免梯度爆炸
-            if use_amp:
-                scaler.unscale_(self.opt)
-                torch.nn.utils.clip_grad_norm_(
-                    list(self.net.parameters()) + list(self.net_1.parameters()),
-                    max_norm=1.0
-                )
-            else:
-                torch.nn.utils.clip_grad_norm_(
-                    list(self.net.parameters()) + list(self.net_1.parameters()),
-                    max_norm=1.0
-                )
+            torch.nn.utils.clip_grad_norm_(
+                list(self.net.parameters()) + list(self.net_1.parameters()),
+                max_norm=1.0
+            )
             
             # 更新參數
             if torch.cuda.is_available():
@@ -742,11 +725,7 @@ class PysicsInformedNeuralNetwork:
             
             while retry_count < max_retry_attempts:
                 try:
-                    if use_amp:
-                        scaler.step(self.opt)
-                        scaler.update()
-                    else:
-                        self.opt.step()
+                    self.opt.step()
                     break  # 成功執行，跳出重試循環
                     
                 except RuntimeError as e:
