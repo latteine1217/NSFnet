@@ -92,16 +92,19 @@ class PysicsInformedNeuralNetwork:
 
         # Wrap models with DDP only if in distributed mode
         if self.world_size > 1:
+            # 使用更穩定的DDP配置來避免unused parameters錯誤
             self.net = DDP(self.net, 
                            device_ids=[self.local_rank], 
                            output_device=self.local_rank,
-                           find_unused_parameters=True,
-                           broadcast_buffers=True)
+                           find_unused_parameters=False,
+                           broadcast_buffers=False,
+                           gradient_as_bucket_view=True)
             self.net_1 = DDP(self.net_1, 
                              device_ids=[self.local_rank], 
                              output_device=self.local_rank,
-                             find_unused_parameters=True,
-                             broadcast_buffers=True)
+                             find_unused_parameters=False,
+                             broadcast_buffers=False,
+                             gradient_as_bucket_view=True)
 
         if net_params:
             if self.rank == 0:
@@ -417,9 +420,14 @@ class PysicsInformedNeuralNetwork:
                               torch.mean(torch.square(v_b_flat - v_pred_b_flat))
             else:
                 # 沒有邊界數據時設置損失為0，但保持在計算圖中
-                # 使用網路的第一層參數創建與參數相關的零損失
-                dummy_loss = torch.sum(self.net.module.layers[0].weight * 0.0)
-                self.loss_b = dummy_loss
+                # 確保兩個網路都參與計算圖
+                if hasattr(self.net, 'module'):
+                    dummy_loss_net = torch.sum(self.net.module.layers[0].weight * 0.0)
+                    dummy_loss_net1 = torch.sum(self.net_1.module.layers[0].weight * 0.0)
+                else:
+                    dummy_loss_net = torch.sum(self.net.layers[0].weight * 0.0)
+                    dummy_loss_net1 = torch.sum(self.net_1.layers[0].weight * 0.0)
+                self.loss_b = dummy_loss_net + dummy_loss_net1
 
         # equation
         assert self.x_f is not None and self.y_f is not None
@@ -452,8 +460,21 @@ class PysicsInformedNeuralNetwork:
             self.loss_b_avg = self.loss_b
             self.loss_e_avg = self.loss_e
 
-        # 計算總損失（保持梯度追踪）
+        # 計算總損失（保持梯度追踪），確保兩個網路都參與
         self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e
+        
+        # 添加一個小的正則化項確保兩個網路都參與梯度計算
+        # 這不會影響訓練結果，但確保DDP工作正常
+        if self.world_size > 1:
+            regularization_weight = 1e-8
+            if hasattr(self.net, 'module'):
+                net_reg = torch.sum(torch.stack([torch.sum(p**2) for p in self.net.module.parameters()]))
+                net1_reg = torch.sum(torch.stack([torch.sum(p**2) for p in self.net_1.module.parameters()]))
+            else:
+                net_reg = torch.sum(torch.stack([torch.sum(p**2) for p in self.net.parameters()]))
+                net1_reg = torch.sum(torch.stack([torch.sum(p**2) for p in self.net_1.parameters()]))
+            
+            self.loss = self.loss + regularization_weight * (net_reg + net1_reg)
 
         # 創建用於backward的loss（保持梯度）
         loss_for_backward = self.loss

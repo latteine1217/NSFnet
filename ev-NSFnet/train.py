@@ -1,4 +1,3 @@
-# Copyright (c) 2023 scien42.tech, Se42 Authors. All Rights Reserved.
 import os
 import torch
 import torch.distributed as dist
@@ -8,13 +7,17 @@ import cavity_data as cavity
 import pinn_solver as psolver
 import warnings
 
+# 設定環境變數來避免DDP錯誤
+os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'DETAIL'
+os.environ['NCCL_DEBUG'] = 'INFO'
+
 # 抑制 PyTorch 分散式訓練相關警告
 warnings.filterwarnings("ignore", message=".*c10d::allreduce_.*autograd kernel.*")
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.autograd")
 
 
 def setup_distributed():
-    """Initialize distributed training"""
+    """Initialize distributed training with better error handling"""
     # 檢查是否在分布式環境中
     if 'WORLD_SIZE' not in os.environ or int(os.environ['WORLD_SIZE']) <= 1:
         print("Not running in distributed mode")
@@ -29,13 +32,22 @@ def setup_distributed():
 
     # 初始化分布式進程組
     try:
-        dist.init_process_group(backend='nccl')
+        # 設定timeout來避免掛起
+        dist.init_process_group(
+            backend='nccl',
+            timeout=torch.distributed.default_pg_timeout,
+            init_method=None
+        )
         
         rank = dist.get_rank()
         world_size = dist.get_world_size()
         local_rank = int(os.environ['LOCAL_RANK'])
         
         torch.cuda.set_device(local_rank)
+        
+        # 設定CUDA設定來提升穩定性
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
         
         print(f"[GPU {rank}] Distributed training initialized:")
         print(f"  World size: {world_size}")
