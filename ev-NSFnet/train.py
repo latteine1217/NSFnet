@@ -34,14 +34,22 @@ def setup_distributed():
     # 初始化分布式進程組
     try:
         if not dist.is_initialized():
-            print("🔗 初始化分布式訓練...")
+            # 只有在 rank 0 時才顯示初始化信息
+            rank = int(os.environ.get('RANK', 0))
+            if rank == 0:
+                print("🔗 初始化分布式訓練...")
+                
             dist.init_process_group(backend='nccl')
             
             rank = dist.get_rank()
             world_size = dist.get_world_size()
             local_rank = int(os.environ['LOCAL_RANK'])
             
-            print(f"📡 Rank {rank}/{world_size}, Local Rank {local_rank}")
+            # 只有主進程顯示分布式信息
+            if rank == 0:
+                print(f"📡 分布式訓練設置完成: {world_size} GPUs")
+                print(f"   - Backend: NCCL")
+                print(f"   - 每個進程負責 GPU {local_rank}")
             
             # 設定CUDA設備
             if torch.cuda.is_available():
@@ -50,8 +58,10 @@ def setup_distributed():
         return True  # 分布式模式
         
     except Exception as e:
-        print(f"❌ 分布式初始化失敗: {e}")
-        print("💻 退回單GPU模式")
+        rank = int(os.environ.get('RANK', 0))
+        if rank == 0:
+            print(f"❌ 分布式初始化失敗: {e}")
+            print("💻 退回單GPU模式")
         os.environ['RANK'] = '0'
         os.environ['LOCAL_RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
@@ -69,28 +79,39 @@ def main():
     # 設置分布式環境
     is_distributed = setup_distributed()
     
+    # 獲取當前進程的rank（用於控制輸出）
+    rank = int(os.environ.get('RANK', 0))
+    
     try:
-        # 載入配置
-        print(f"📂 載入配置文件: {args.config}")
+        # 只在主進程顯示配置載入信息
+        if rank == 0:
+            print(f"📂 載入配置文件: {args.config}")
+        
         config_manager = ConfigManager.from_file(args.config)
         
-        # 驗證配置
-        warnings = config_manager.validate_config()
-        if warnings:
-            print("⚠️  配置警告:")
-            for warning in warnings:
-                print(f"   - {warning}")
+        # 只在主進程顯示驗證和配置信息
+        if rank == 0:
+            # 驗證配置
+            warnings = config_manager.validate_config()
+            if warnings:
+                print("⚠️  配置警告:")
+                for warning in warnings:
+                    print(f"   - {warning}")
+            
+            # 顯示配置
+            config_manager.print_config()
+            
+            if args.dry_run:
+                print("🏃 Dry run模式，不執行訓練")
+                return
         
-        # 顯示配置
-        config_manager.print_config()
-        
+        # Dry run檢查（所有進程都需要退出）
         if args.dry_run:
-            print("🏃 Dry run模式，不執行訓練")
             return
         
-        # 創建PINN實例 (使用配置)
-        config = config_manager.config
-        print("🚀 創建PINN實例...")
+        # 只在主進程顯示PINN創建信息
+        if rank == 0:
+            print("🚀 創建PINN實例...")
         
         PINN = psolver.PysicsInformedNeuralNetwork(
             Re=config.physics.Re,
@@ -106,8 +127,10 @@ def main():
             checkpoint_freq=config.training.checkpoint_freq
         )
         
-        # 載入數據
-        print("📁 載入訓練數據...")
+        # 只在主進程顯示數據載入信息
+        if rank == 0:
+            print("📁 載入訓練數據...")
+        
         path = './data/'
         dataloader = cavity.DataLoader(path=path, N_f=config.training.N_f, N_b=1000)
 
