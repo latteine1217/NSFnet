@@ -91,8 +91,14 @@ class PysicsInformedNeuralNetwork:
                 num_ins=num_ins, num_outs=num_outs_1, num_layers=layers_1, hidden_size=hidden_size_1).to(self.device)
 
         # Wrap models with DDP
-        self.net = DDP(self.net, device_ids=[self.local_rank], output_device=self.local_rank)
-        self.net_1 = DDP(self.net_1, device_ids=[self.local_rank], output_device=self.local_rank)
+        self.net = DDP(self.net, 
+                       device_ids=[self.local_rank], 
+                       output_device=self.local_rank,
+                       find_unused_parameters=True)
+        self.net_1 = DDP(self.net_1, 
+                         device_ids=[self.local_rank], 
+                         output_device=self.local_rank,
+                         find_unused_parameters=True)
 
         if net_params:
             if self.rank == 0:
@@ -121,6 +127,7 @@ class PysicsInformedNeuralNetwork:
             print(f"  Rank: {self.rank}")
             print(f"  Local rank: {self.local_rank}")
             print(f"  Device: {self.device}")
+            print(f"  DDP find_unused_parameters: True (enabled for dynamic network freezing)")
 
     def init_vis_t(self):
         (_,_,_,e) = self.neural_net_u(self.x_f, self.y_f)
@@ -599,28 +606,39 @@ class PysicsInformedNeuralNetwork:
                 self.save(saved_ckpt, N_HLayer=layers, N_neu=hidden_size, N_f=N_f)
 
     def freeze_evm_net(self, epoch_id):
-        """凍結EVM網絡參數"""
-        for para in self.net_1.parameters():
-                para.requires_grad = False
+        """改進凍結機制，兼容DDP"""
+        if self.rank == 0:
+            print(f"[Epoch {epoch_id}] Freezing EVM network parameters")
+        
+        for param in self.net_1.parameters():
+            param.requires_grad = False
     
-        # 重新創建優化器只包含需要訓練的參數
-        self.opt = torch.optim.Adam(
-                [p for p in self.net.parameters() if p.requires_grad],
-                lr=self.opt.param_groups[0]['lr'],
-                weight_decay=0.0
-                )
+        # 更新optimizer的參數組，而不是重新創建optimizer
+        active_params = [p for p in self.net.parameters() if p.requires_grad]
+        if len(active_params) > 0:
+            self.opt.param_groups[0]['params'] = active_params
+        else:
+            # 如果沒有活動參數，保持原有參數但設置學習率為0
+            for param_group in self.opt.param_groups:
+                param_group['lr'] = 0.0
 
     def defreeze_evm_net(self, epoch_id):
-        """解凍EVM網絡參數"""
-        for para in self.net_1.parameters():
-                para.requires_grad = True
+        """改進解凍機制，兼容DDP"""
+        if self.rank == 0:
+            print(f"[Epoch {epoch_id}] Unfreezing EVM network parameters")
+        
+        for param in self.net_1.parameters():
+            param.requires_grad = True
     
-        # 重新創建優化器包含所有參數
-        self.opt = torch.optim.Adam(
-                list(self.net.parameters()) + list(self.net_1.parameters()),
-                lr=self.opt.param_groups[0]['lr'],
-                weight_decay=0.0
-                )
+        # 更新optimizer的參數組包含所有參數
+        all_params = list(self.net.parameters()) + list(self.net_1.parameters())
+        active_params = [p for p in all_params if p.requires_grad]
+        
+        if len(active_params) > 0:
+            # 恢復學習率並更新參數列表
+            original_lr = 0.001  # 或從配置中獲取
+            self.opt.param_groups[0]['params'] = active_params
+            self.opt.param_groups[0]['lr'] = original_lr
 
     def print_log_batch(self, loss, losses, epoch_id, num_epoch, batch_size, steps_per_epoch):
         def get_lr(optimizer):
