@@ -504,70 +504,17 @@ class PysicsInformedNeuralNetwork:
         return self.solve_Adam(self.fwd_computing_loss_2d, num_epoch, batchsize, scheduler)
 
     def solve_Adam(self, loss_func, num_epoch=1000, batchsize=None, scheduler=None):
-        # 啟用初始凍結 - 使用static_graph=True避免DDP錯誤
+        # 啟用初始凍結
         self.freeze_evm_net(0)
         
-        # 如果指定了 batchsize，使用批次訓練
-        if batchsize is not None:
-            self.batch_size = batchsize
-        
-        # 創建DataLoader進行批次處理
+        # 使用完整數據進行訓練（不使用批次處理）
         actual_data_points = self.x_f.shape[0]
         
-        # 詳細檢查數據分配
         if self.rank == 0:
-            print(f"=== Data Allocation Verification ===")
-            print(f"Total training points (N_f): {self.N_f}")
-            print(f"World size (num GPUs): {self.world_size}")
-            print(f"Expected points per GPU: {self.N_f // self.world_size}")
-            print(f"Actual GPU data points: {actual_data_points}")
-            print(f"Batch size: {self.batch_size}")
-            print(f"Expected steps per epoch: {actual_data_points // self.batch_size}")
-            if actual_data_points != self.N_f // self.world_size:
-                print(f"⚠️  WARNING: Data allocation mismatch!")
-            print("=" * 40)
-        
-        # 創建TensorDataset
-        dataset = TensorDataset(self.x_f, self.y_f)
-        
-        # 創建DataLoader with distributed support
-        if self.world_size > 1:
-            # 分散式訓練使用DistributedSampler
-            sampler = DistributedSampler(
-                dataset, 
-                num_replicas=self.world_size, 
-                rank=self.rank,
-                shuffle=True,
-                drop_last=False  # 保持所有數據，確保完整訓練
-            )
-            dataloader = DataLoader(
-                dataset,
-                batch_size=self.batch_size,
-                sampler=sampler,
-                drop_last=False,  # 保持所有數據
-                pin_memory=False,  # 數據已在GPU上，不需要pin_memory
-                num_workers=0  # 避免多進程問題
-            )
-        else:
-            # 單GPU模式
-            dataloader = DataLoader(
-                dataset,
-                batch_size=self.batch_size,
-                shuffle=True,
-                drop_last=False,  # 保持所有數據
-                pin_memory=False,  # 數據已在GPU上，不需要pin_memory
-                num_workers=0
-            )
-        
-        effective_batch_size = min(self.batch_size, actual_data_points)
-        steps_per_epoch = len(dataloader)
-        
-        if self.rank == 0:
-            print(f"=== Training Configuration (DataLoader) ===")
+            print(f"=== Training Configuration (Full Batch) ===")
             print(f"Total training points (N_f): {self.N_f}")
             print(f"Actual GPU data points: {actual_data_points}")
-            print(f"Effective batch size: {effective_batch_size}")
-            print(f"Steps per epoch: {steps_per_epoch}")
+            print(f"Training mode: Full batch (no DataLoader)")
             print(f"Total epochs: {num_epoch}")
             print(f"DDP Mode: {'Enabled' if self.world_size > 1 else 'Disabled'}")
             
@@ -585,95 +532,52 @@ class PysicsInformedNeuralNetwork:
             if (epoch_id - 1) % 10000 == 0:
                 self.freeze_evm_net(epoch_id)
 
-            # 設置epoch對於DistributedSampler
-            if self.world_size > 1:
-                dataloader.sampler.set_epoch(epoch_id)
-
             # 清除上一個epoch的梯度
             self.opt.zero_grad()
 
-            epoch_loss = 0.0
-            epoch_losses = [0.0, 0.0]
+            # 直接使用完整數據計算損失（不使用批次處理）
+            loss, losses = loss_func()
             
-            # 使用DataLoader進行批次處理
-            for step, (batch_x_f, batch_y_f) in enumerate(dataloader):
-                # 設置當前批次數據（數據已在正確設備上）
-                self.x_f = batch_x_f
-                self.y_f = batch_y_f
-                
-                # 計算損失
-                with torch.enable_grad():
-                    loss, losses = loss_func()
-                
-                # 正規化損失進行梯度累積
-                normalized_loss = loss / steps_per_epoch
-                
-                # 梯度累積
-                try:
-                    normalized_loss.backward()
-                except RuntimeError as e:
-                    if "backward through the graph a second time" in str(e):
-                        if self.rank == 0:
-                            print(f"Warning: Graph reuse detected at step {step}, skipping this batch")
-                        del loss, normalized_loss
-                        torch.cuda.empty_cache()
-                        continue
-                    else:
-                        raise e
-                
-                # 記錄損失值
-                epoch_loss += loss.detach().item()
-                epoch_losses[0] += losses[0] if isinstance(losses[0], (int, float)) else losses[0].detach().item()
-                epoch_losses[1] += losses[1] if isinstance(losses[1], (int, float)) else losses[1].detach().item()
-                
-                # 清理張量引用
-                del loss, normalized_loss
-                
-                # 定期清理GPU緩存
-                if step % max(1, steps_per_epoch // 4) == 0 and step > 0:
-                    torch.cuda.empty_cache()
+            # 梯度回傳
+            loss.backward()
+            
+            # 記錄損失值
+            epoch_loss = loss.detach().item()
+            epoch_losses = [
+                losses[0] if isinstance(losses[0], (int, float)) else losses[0].detach().item(),
+                losses[1] if isinstance(losses[1], (int, float)) else losses[1].detach().item()
+            ]
+            
+            # 清理張量引用
+            del loss
             
             # 梯度裁剪避免梯度爆炸
-            if self.world_size > 1:
-                # DDP環境下的梯度裁剪
-                torch.nn.utils.clip_grad_norm_(
-                    list(self.net.parameters()) + list(self.net_1.parameters()),
-                    max_norm=1.0
-                )
-            else:
-                torch.nn.utils.clip_grad_norm_(
-                    list(self.net.parameters()) + list(self.net_1.parameters()),
-                    max_norm=1.0
-                )
+            torch.nn.utils.clip_grad_norm_(
+                list(self.net.parameters()) + list(self.net_1.parameters()),
+                max_norm=1.0
+            )
             
-            # 一個epoch結束後統一更新參數
+            # 更新參數
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             
             # 檢查DDP狀態並嘗試恢復
             try:
                 self.opt.step()
-                self.opt.zero_grad()
             except RuntimeError as e:
                 if "INTERNAL ASSERT FAILED" in str(e) or "unmarked_param_indices" in str(e):
                     if self.rank == 0:
                         print(f"Warning: DDP sync error at epoch {epoch_id}, attempting recovery...")
-                    self.opt.zero_grad()
                     continue
                 else:
                     raise e
             
-            # 計算平均損失
-            epoch_loss /= steps_per_epoch
-            epoch_losses[0] /= steps_per_epoch
-            epoch_losses[1] /= steps_per_epoch
-            
             if scheduler:
                 scheduler.step()
 
-            # 只在rank 0打印和保存
+            # 只在rank 0打印和保存（不需要平均，因為沒有步驟累積）
             if self.rank == 0 and (epoch_id == 0 or (epoch_id + 1) % 100 == 0):
-                self.print_log_batch(epoch_loss, epoch_losses, epoch_id, num_epoch, effective_batch_size, steps_per_epoch)
+                self.print_log_full_batch(epoch_loss, epoch_losses, epoch_id, num_epoch, actual_data_points)
 
             if self.rank == 0 and (epoch_id == 0 or epoch_id % self.checkpoint_freq == 0):
                 saved_ckpt = 'model_cavity_loop%d.pth' % (epoch_id)
@@ -732,6 +636,12 @@ class PysicsInformedNeuralNetwork:
         
         if self.rank == 0:
             print(f"  Active parameters: {len(all_params)} (net + net_1)")
+
+    def print_log_full_batch(self, loss, losses, epoch_id, num_epoch, data_points):
+        current_lr = self.opt.param_groups[0]['lr']
+        print('current lr is {}'.format(current_lr))
+        print('epoch/num_epoch: {:6d} / {:d} data_points: {:d} avg_loss[Adam]: {:.3e} avg_eq1_loss: {:.3e}  avg_bc_loss: {:.3e}'.format(
+            epoch_id + 1, num_epoch, data_points, loss, losses[0], losses[1]))
 
     def print_log_batch(self, loss, losses, epoch_id, num_epoch, batch_size, steps_per_epoch):
         def get_lr(optimizer):

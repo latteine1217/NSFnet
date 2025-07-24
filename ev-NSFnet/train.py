@@ -86,7 +86,7 @@ def train(net_params=None):
         lam_bcs = 10
         lam_equ = 1
         N_f = 120000
-        batch_size = 30000  # 批次大小 - 充分利用4GB GPU記憶體
+        # 移除batch size限制，使用完整數據訓練
         alpha_evm = 0.03
         N_HLayer = 6
         N_HLayer_1 = 4
@@ -98,7 +98,6 @@ def train(net_params=None):
             hidden_size = N_neu,
             hidden_size_1 = N_neu_1,
             N_f = N_f,
-            batch_size = batch_size,
             alpha_evm=alpha_evm,
             bc_weight=lam_bcs,
             eq_weight=lam_equ,
@@ -134,7 +133,7 @@ def train(net_params=None):
             
             PINN.current_stage = stage_name
             PINN.set_alpha_evm(alpha)
-            PINN.train(num_epoch=epochs, lr=lr, batchsize=batch_size)
+            PINN.train(num_epoch=epochs, lr=lr)
             
             if not is_distributed or PINN.rank == 0:
                 PINN.evaluate(x_star, y_star, u_star, v_star, p_star)
