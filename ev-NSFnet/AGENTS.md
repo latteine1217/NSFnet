@@ -32,6 +32,7 @@
 ## Code Style & Conventions
 - **Language**: Python 3.10+
 - **Imports**: Standard library first, third-party (torch, numpy, scipy), then local modules
+- **pytorch version**: 2.6.0+cu126
 - **Naming**: snake_case for variables/functions, PascalCase for classes
 - **Comments**: Chinese comments allowed, function docstrings in English
 - **Types**: Type hints used in function signatures (typing module imports)

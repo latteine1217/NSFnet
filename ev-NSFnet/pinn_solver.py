@@ -511,156 +511,135 @@ class PysicsInformedNeuralNetwork:
         # 如果指定了 batchsize，使用批次訓練
         if batchsize is not None:
             self.batch_size = batchsize
-            
-        # 確定實際使用的批次大小
-        actual_batch_size = self.batch_size
         
-        # 獲取實際數據點數量（每個GPU載入的點數）
+        # 創建DataLoader進行批次處理
         actual_data_points = self.x_f.shape[0]
         
-        # 計算每個epoch需要的步數
-        if actual_batch_size < actual_data_points:
-            steps_per_epoch = (actual_data_points + actual_batch_size - 1) // actual_batch_size
+        # 創建TensorDataset
+        dataset = TensorDataset(self.x_f, self.y_f)
+        
+        # 創建DataLoader with distributed support
+        if self.world_size > 1:
+            # 分散式訓練使用DistributedSampler
+            sampler = DistributedSampler(
+                dataset, 
+                num_replicas=self.world_size, 
+                rank=self.rank,
+                shuffle=True,
+                drop_last=True  # 避免最後批次大小不一致
+            )
+            dataloader = DataLoader(
+                dataset,
+                batch_size=self.batch_size,
+                sampler=sampler,
+                drop_last=True,
+                pin_memory=True,
+                num_workers=0  # 避免多進程問題
+            )
         else:
-            steps_per_epoch = 1
-            actual_batch_size = actual_data_points
+            # 單GPU模式
+            dataloader = DataLoader(
+                dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                drop_last=True,
+                pin_memory=True,
+                num_workers=0
+            )
+        
+        effective_batch_size = min(self.batch_size, actual_data_points)
+        steps_per_epoch = len(dataloader)
         
         if self.rank == 0:
-            print(f"=== Training Configuration ===")
+            print(f"=== Training Configuration (DataLoader) ===")
             print(f"Total training points (N_f): {self.N_f}")
             print(f"Actual GPU data points: {actual_data_points}")
-            print(f"Batch size: {actual_batch_size}")
+            print(f"Effective batch size: {effective_batch_size}")
             print(f"Steps per epoch: {steps_per_epoch}")
-            print(f"Gradient accumulation: {steps_per_epoch} batches per optimizer step")
             print(f"Total epochs: {num_epoch}")
-            print(f"DDP Mode: Dynamic parameter freezing enabled with static_graph=True")
-            print("=" * 30)
+            print(f"DDP Mode: {'Enabled' if self.world_size > 1 else 'Disabled'}")
+            print("=" * 45)
         
         for epoch_id in range(num_epoch):
-            # 恢復原有的動態凍結邏輯 - 現在使用static_graph=True避免錯誤
-            # train evm net every 10000 step
+            # 恢復原有的動態凍結邏輯
             if epoch_id != 0 and epoch_id % 10000 == 0:
                 self.defreeze_evm_net(epoch_id)
             if (epoch_id - 1) % 10000 == 0:
                 self.freeze_evm_net(epoch_id)
 
+            # 設置epoch對於DistributedSampler
+            if self.world_size > 1:
+                dataloader.sampler.set_epoch(epoch_id)
+
             # 清除上一個epoch的梯度
             self.opt.zero_grad()
 
-            # 重新載入原始數據（在每個epoch開始時重置）
-            original_x_f = self.x_f.clone()
-            original_y_f = self.y_f.clone()
-            actual_data_points = original_x_f.shape[0]
-            
-            # Epoch間數據洗牌 - 每5個epoch洗牌一次
-            if epoch_id > 0 and epoch_id % 5 == 0:
-                # 使用實際載入的數據點數量，而不是總數據點數量
-                actual_points = original_x_f.shape[0]
-                shuffle_indices = torch.randperm(actual_points)
-                original_x_f = original_x_f[shuffle_indices]
-                original_y_f = original_y_f[shuffle_indices]
-                if self.rank == 0:
-                    print(f"[Epoch {epoch_id}] Data shuffled for better convergence (points: {actual_points})")
-
             epoch_loss = 0.0
-            epoch_losses = [0.0, 0.0]  # 預初始化為數值
+            epoch_losses = [0.0, 0.0]
             
-            # 梯度累積循環 - 批次訓練循環
-            for step in range(steps_per_epoch):
-                # 計算當前批次的索引範圍
-                start_idx = step * actual_batch_size
-                end_idx = min(start_idx + actual_batch_size, actual_data_points)
-                current_batch_size = end_idx - start_idx
-                
-                # 檢查索引邊界
-                if start_idx >= actual_data_points:
-                    print(f"WARNING: start_idx {start_idx} >= actual_data_points {actual_data_points}")
-                    break
-                
-                # 使用循環覆蓋採樣
-                if actual_batch_size < actual_data_points:
-                    # 檢查切片邊界
-                    if end_idx > original_x_f.shape[0]:
-                        print(f"ERROR: end_idx {end_idx} > data size {original_x_f.shape[0]}")
-                        end_idx = original_x_f.shape[0]
-                        if start_idx >= end_idx:
-                            print(f"ERROR: Invalid slice range [{start_idx}:{end_idx}]")
-                            break
-                    
-                    self.x_f = original_x_f[start_idx:end_idx]
-                    self.y_f = original_y_f[start_idx:end_idx]
-                    
-                    # 檢查批次數據是否有效
-                    if self.x_f.shape[0] == 0:
-                        print(f"ERROR: Empty batch at step {step}")
-                        break
+            # 使用DataLoader進行批次處理
+            for step, (batch_x_f, batch_y_f) in enumerate(dataloader):
+                # 設置當前批次數據
+                self.x_f = batch_x_f.to(self.device)
+                self.y_f = batch_y_f.to(self.device)
                 
                 # 計算損失
-                loss, losses = loss_func()
+                with torch.enable_grad():
+                    loss, losses = loss_func()
                 
-                # 正規化損失避免梯度爆炸
+                # 正規化損失進行梯度累積
                 normalized_loss = loss / steps_per_epoch
                 
-                # 梯度累積：只做backward，不step，添加錯誤恢復
+                # 梯度累積
                 try:
                     normalized_loss.backward()
                 except RuntimeError as e:
                     if "backward through the graph a second time" in str(e):
                         if self.rank == 0:
                             print(f"Warning: Graph reuse detected at step {step}, skipping this batch")
-                        # 清理張量引用並繼續
                         del loss, normalized_loss
+                        torch.cuda.empty_cache()
                         continue
                     else:
                         raise e
                 
-                # 記錄損失值（現在losses已經是數值列表）
+                # 記錄損失值
                 epoch_loss += loss.detach().item()
-                epoch_losses[0] += losses[0]
-                epoch_losses[1] += losses[1]
+                epoch_losses[0] += losses[0] if isinstance(losses[0], (int, float)) else losses[0].detach().item()
+                epoch_losses[1] += losses[1] if isinstance(losses[1], (int, float)) else losses[1].detach().item()
                 
-                # 立即清理張量引用
+                # 清理張量引用
                 del loss, normalized_loss
                 
                 # 定期清理GPU緩存
                 if step % max(1, steps_per_epoch // 4) == 0 and step > 0:
                     torch.cuda.empty_cache()
-                
-                # 在每個step後恢復原始數據大小以備下次使用
-                if actual_batch_size < actual_data_points:
-                    self.x_f = original_x_f
-                    self.y_f = original_y_f
             
-            # 檢查梯度狀態並進行裁剪
-            grad_norm = self._check_gradients()
-            if grad_norm > 10.0:  # 如果梯度過大
-                if self.rank == 0:
-                    print(f"Warning: Large gradient norm {grad_norm:.2f}, clipping...")
+            # 梯度裁剪避免梯度爆炸
+            if self.world_size > 1:
+                # DDP環境下的梯度裁剪
                 torch.nn.utils.clip_grad_norm_(
                     list(self.net.parameters()) + list(self.net_1.parameters()),
                     max_norm=1.0
                 )
-            elif grad_norm > 1.0:
-                # 標準梯度裁剪
+            else:
                 torch.nn.utils.clip_grad_norm_(
-                    list(self.net.parameters()) + list(self.net_1.parameters()), 
+                    list(self.net.parameters()) + list(self.net_1.parameters()),
                     max_norm=1.0
                 )
             
             # 一個epoch結束後統一更新參數
-            # 確保所有進程的梯度同步完成
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             
             # 檢查DDP狀態並嘗試恢復
             try:
                 self.opt.step()
-                self.opt.zero_grad()  # 清理梯度為下一個epoch準備
+                self.opt.zero_grad()
             except RuntimeError as e:
                 if "INTERNAL ASSERT FAILED" in str(e) or "unmarked_param_indices" in str(e):
                     if self.rank == 0:
                         print(f"Warning: DDP sync error at epoch {epoch_id}, attempting recovery...")
-                    # 清理梯度並跳過這次更新
                     self.opt.zero_grad()
                     continue
                 else:
@@ -676,7 +655,7 @@ class PysicsInformedNeuralNetwork:
 
             # 只在rank 0打印和保存
             if self.rank == 0 and (epoch_id == 0 or (epoch_id + 1) % 100 == 0):
-                self.print_log_batch(epoch_loss, epoch_losses, epoch_id, num_epoch, actual_batch_size, steps_per_epoch)
+                self.print_log_batch(epoch_loss, epoch_losses, epoch_id, num_epoch, effective_batch_size, steps_per_epoch)
 
             if self.rank == 0 and (epoch_id == 0 or epoch_id % self.checkpoint_freq == 0):
                 saved_ckpt = 'model_cavity_loop%d.pth' % (epoch_id)
@@ -684,7 +663,6 @@ class PysicsInformedNeuralNetwork:
                 hidden_size = self.hidden_size
                 N_f = self.N_f
                 self.save(saved_ckpt, N_HLayer=layers, N_neu=hidden_size, N_f=N_f)
-
     def freeze_evm_net(self, epoch_id):
         """
         凍結EVM網路參數 - 使用static_graph=True避免DDP bucket重建問題
