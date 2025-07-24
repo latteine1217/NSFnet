@@ -514,6 +514,19 @@ class PysicsInformedNeuralNetwork:
         # 創建DataLoader進行批次處理
         actual_data_points = self.x_f.shape[0]
         
+        # 詳細檢查數據分配
+        if self.rank == 0:
+            print(f"=== Data Allocation Verification ===")
+            print(f"Total training points (N_f): {self.N_f}")
+            print(f"World size (num GPUs): {self.world_size}")
+            print(f"Expected points per GPU: {self.N_f // self.world_size}")
+            print(f"Actual GPU data points: {actual_data_points}")
+            print(f"Batch size: {self.batch_size}")
+            print(f"Expected steps per epoch: {actual_data_points // self.batch_size}")
+            if actual_data_points != self.N_f // self.world_size:
+                print(f"⚠️  WARNING: Data allocation mismatch!")
+            print("=" * 40)
+        
         # 創建TensorDataset
         dataset = TensorDataset(self.x_f, self.y_f)
         
@@ -557,6 +570,12 @@ class PysicsInformedNeuralNetwork:
             print(f"Steps per epoch: {steps_per_epoch}")
             print(f"Total epochs: {num_epoch}")
             print(f"DDP Mode: {'Enabled' if self.world_size > 1 else 'Disabled'}")
+            
+            # 檢查GPU記憶體使用量
+            if torch.cuda.is_available():
+                memory_allocated = torch.cuda.memory_allocated(self.device) / 1024**3
+                memory_reserved = torch.cuda.memory_reserved(self.device) / 1024**3
+                print(f"GPU Memory - Allocated: {memory_allocated:.2f}GB, Reserved: {memory_reserved:.2f}GB")
             print("=" * 45)
         
         for epoch_id in range(num_epoch):
