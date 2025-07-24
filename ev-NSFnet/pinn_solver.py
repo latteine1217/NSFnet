@@ -446,9 +446,6 @@ class PysicsInformedNeuralNetwork:
             if (epoch_id - 1) % 10000 == 0:
                 self.freeze_evm_net(epoch_id)
 
-            # 清除上一個epoch的梯度
-            self.opt.zero_grad()
-
             # 重新載入原始數據（在每個epoch開始時重置）
             original_x_f = self.x_f.clone()
             original_y_f = self.y_f.clone()
@@ -467,7 +464,7 @@ class PysicsInformedNeuralNetwork:
             epoch_loss = 0.0
             epoch_losses = None
             
-            # 梯度累積循環 - 批次訓練循環
+            # micro-batch迴圈
             for step in range(steps_per_epoch):
                 # 計算當前批次的索引範圍
                 start_idx = step * actual_batch_size
@@ -500,8 +497,14 @@ class PysicsInformedNeuralNetwork:
                 # 計算損失
                 loss, losses = loss_func()
                 
-                # 梯度累積：反向傳播但不更新參數
-                loss.backward()  # 移除 retain_graph=True
+                # 反向傳播
+                loss.backward()
+                
+                # 每個micro-batch後立即更新參數
+                self.opt.step()
+                
+                # 清除梯度準備下一個micro-batch
+                self.opt.zero_grad()
                 
                 epoch_loss += loss.item()
                 if epoch_losses is None:
@@ -514,9 +517,6 @@ class PysicsInformedNeuralNetwork:
                 if actual_batch_size < actual_data_points:
                     self.x_f = original_x_f
                     self.y_f = original_y_f
-            
-            # 一個epoch只呼叫一次optimizer.step()
-            self.opt.step()
             
             # 計算平均損失
             epoch_loss /= steps_per_epoch
