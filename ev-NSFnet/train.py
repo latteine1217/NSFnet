@@ -88,6 +88,7 @@ def main():
             print(f"📂 載入配置文件: {args.config}")
         
         config_manager = ConfigManager.from_file(args.config)
+        config = config_manager.config  # 獲取配置對象
         
         # 只在主進程顯示驗證和配置信息
         if rank == 0:
