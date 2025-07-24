@@ -92,19 +92,21 @@ class PysicsInformedNeuralNetwork:
 
         # Wrap models with DDP only if in distributed mode
         if self.world_size > 1:
-            # 使用更穩定的DDP配置來避免unused parameters錯誤
+            # 使用static_graph=True避免動態參數凍結時的bucket重建問題
             self.net = DDP(self.net, 
                            device_ids=[self.local_rank], 
                            output_device=self.local_rank,
-                           find_unused_parameters=True,
-                           broadcast_buffers=False,
-                           gradient_as_bucket_view=False)
+                           find_unused_parameters=True,   # 允許部分參數未使用
+                           broadcast_buffers=True,        # 確保buffer同步
+                           gradient_as_bucket_view=True,  # 提升記憶體效率
+                           static_graph=True)             # 防止動態凍結時bucket重建
             self.net_1 = DDP(self.net_1, 
                              device_ids=[self.local_rank], 
                              output_device=self.local_rank,
-                             find_unused_parameters=True,
-                             broadcast_buffers=False,
-                             gradient_as_bucket_view=False)
+                             find_unused_parameters=True,   # 允許部分參數未使用
+                             broadcast_buffers=True,        # 確保buffer同步
+                             gradient_as_bucket_view=True,  # 提升記憶體效率
+                             static_graph=True)             # 防止動態凍結時bucket重建
 
         if net_params:
             if self.rank == 0:
@@ -503,6 +505,7 @@ class PysicsInformedNeuralNetwork:
         return self.solve_Adam(self.fwd_computing_loss_2d, num_epoch, batchsize, scheduler)
 
     def solve_Adam(self, loss_func, num_epoch=1000, batchsize=None, scheduler=None):
+        # 啟用初始凍結 - 使用static_graph=True避免DDP錯誤
         self.freeze_evm_net(0)
         
         # 如果指定了 batchsize，使用批次訓練
@@ -530,9 +533,11 @@ class PysicsInformedNeuralNetwork:
             print(f"Steps per epoch: {steps_per_epoch}")
             print(f"Gradient accumulation: {steps_per_epoch} batches per optimizer step")
             print(f"Total epochs: {num_epoch}")
+            print(f"DDP Mode: Dynamic parameter freezing enabled with static_graph=True")
             print("=" * 30)
         
         for epoch_id in range(num_epoch):
+            # 恢復原有的動態凍結邏輯 - 現在使用static_graph=True避免錯誤
             # train evm net every 10000 step
             if epoch_id != 0 and epoch_id % 10000 == 0:
                 self.defreeze_evm_net(epoch_id)
@@ -681,39 +686,56 @@ class PysicsInformedNeuralNetwork:
                 self.save(saved_ckpt, N_HLayer=layers, N_neu=hidden_size, N_f=N_f)
 
     def freeze_evm_net(self, epoch_id):
-        """改進凍結機制，兼容DDP"""
+        """
+        凍結EVM網路參數 - 使用static_graph=True避免DDP bucket重建問題
+        """
         if self.rank == 0:
-            print(f"[Epoch {epoch_id}] Freezing EVM network parameters")
+            print(f"[Epoch {epoch_id}] Freezing EVM network parameters (DDP-compatible)")
         
+        # 凍結net_1的所有參數
         for param in self.net_1.parameters():
             param.requires_grad = False
     
-        # 更新optimizer的參數組，而不是重新創建optimizer
-        active_params = [p for p in self.net.parameters() if p.requires_grad]
+        # 更新optimizer的參數組 - 僅包含需要梯度的參數
+        active_params = []
+        for param in self.net.parameters():
+            if param.requires_grad:
+                active_params.append(param)
+        
         if len(active_params) > 0:
+            # 更新參數列表，但保持學習率不變
+            current_lr = self.opt.param_groups[0]['lr']
             self.opt.param_groups[0]['params'] = active_params
-        else:
-            # 如果沒有活動參數，保持原有參數但設置學習率為0
-            for param_group in self.opt.param_groups:
-                param_group['lr'] = 0.0
+            self.opt.param_groups[0]['lr'] = current_lr
+        
+        if self.rank == 0:
+            print(f"  Active parameters: {len(active_params)} (net only)")
 
     def defreeze_evm_net(self, epoch_id):
-        """改進解凍機制，兼容DDP"""
+        """
+        解凍EVM網路參數 - 使用static_graph=True避免DDP bucket重建問題
+        """
         if self.rank == 0:
-            print(f"[Epoch {epoch_id}] Unfreezing EVM network parameters")
+            print(f"[Epoch {epoch_id}] Unfreezing EVM network parameters (DDP-compatible)")
         
+        # 解凍net_1的所有參數
         for param in self.net_1.parameters():
             param.requires_grad = True
     
         # 更新optimizer的參數組包含所有參數
-        all_params = list(self.net.parameters()) + list(self.net_1.parameters())
-        active_params = [p for p in all_params if p.requires_grad]
+        all_params = []
+        for param in list(self.net.parameters()) + list(self.net_1.parameters()):
+            if param.requires_grad:
+                all_params.append(param)
         
-        if len(active_params) > 0:
-            # 恢復學習率並更新參數列表
-            original_lr = 0.001  # 或從配置中獲取
-            self.opt.param_groups[0]['params'] = active_params
-            self.opt.param_groups[0]['lr'] = original_lr
+        if len(all_params) > 0:
+            # 更新參數列表，保持當前學習率
+            current_lr = self.opt.param_groups[0]['lr']
+            self.opt.param_groups[0]['params'] = all_params
+            self.opt.param_groups[0]['lr'] = current_lr
+        
+        if self.rank == 0:
+            print(f"  Active parameters: {len(all_params)} (net + net_1)")
 
     def print_log_batch(self, loss, losses, epoch_id, num_epoch, batch_size, steps_per_epoch):
         def get_lr(optimizer):
