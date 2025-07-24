@@ -96,15 +96,15 @@ class PysicsInformedNeuralNetwork:
             self.net = DDP(self.net, 
                            device_ids=[self.local_rank], 
                            output_device=self.local_rank,
-                           find_unused_parameters=False,
+                           find_unused_parameters=True,
                            broadcast_buffers=False,
-                           gradient_as_bucket_view=True)
+                           gradient_as_bucket_view=False)
             self.net_1 = DDP(self.net_1, 
                              device_ids=[self.local_rank], 
                              output_device=self.local_rank,
-                             find_unused_parameters=False,
+                             find_unused_parameters=True,
                              broadcast_buffers=False,
-                             gradient_as_bucket_view=True)
+                             gradient_as_bucket_view=False)
 
         if net_params:
             if self.rank == 0:
