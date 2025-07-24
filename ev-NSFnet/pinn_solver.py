@@ -19,11 +19,14 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import TensorDataset, DataLoader, DistributedSampler
+from torch.utils.tensorboard import SummaryWriter
 import scipy.io
 import numpy as np
 from net import FCNet
 from typing import Dict, List, Set, Optional, Union, Callable
 import warnings
+import time
+import datetime
 
 # 抑制 PyTorch 分散式訓練的 autograd 警告
 warnings.filterwarnings("ignore", message=".*c10d::allreduce_.*autograd kernel.*")
@@ -76,6 +79,21 @@ class PysicsInformedNeuralNetwork:
         self.current_stage = ' '
 
         self.checkpoint_freq = checkpoint_freq
+
+        # TensorBoard設定
+        if self.rank == 0:  # 只在主進程創建TensorBoard writer
+            log_dir = f"runs/NSFnet_Re{Re}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            self.tb_writer = SummaryWriter(log_dir=log_dir)
+            print(f"📊 TensorBoard log directory: {log_dir}")
+        else:
+            self.tb_writer = None
+
+        # 時間追蹤相關變數
+        self.epoch_start_time = None
+        self.epoch_times = []
+        self.stage_start_time = None
+        self.training_start_time = None
+        self.global_step_offset = 0  # 用於計算跨階段的global step
 
         self.alpha_evm = alpha_evm
         self.alpha_b = bc_weight
@@ -510,12 +528,19 @@ class PysicsInformedNeuralNetwork:
         # 使用完整數據進行訓練（不使用批次處理）
         actual_data_points = self.x_f.shape[0]
         
+        # 記錄階段開始時間
+        if self.rank == 0:
+            self.stage_start_time = time.time()
+            if self.training_start_time is None:
+                self.training_start_time = time.time()
+        
         if self.rank == 0:
             print(f"=== Training Configuration (Full Batch) ===")
+            print(f"Stage: {self.current_stage}")
             print(f"Total training points (N_f): {self.N_f}")
             print(f"Actual GPU data points: {actual_data_points}")
             print(f"Training mode: Full batch (no DataLoader)")
-            print(f"Total epochs: {num_epoch}")
+            print(f"Total epochs: {num_epoch:,}")
             print(f"DDP Mode: {'Enabled' if self.world_size > 1 else 'Disabled'}")
             
             # 檢查GPU記憶體使用量
@@ -523,9 +548,16 @@ class PysicsInformedNeuralNetwork:
                 memory_allocated = torch.cuda.memory_allocated(self.device) / 1024**3
                 memory_reserved = torch.cuda.memory_reserved(self.device) / 1024**3
                 print(f"GPU Memory - Allocated: {memory_allocated:.2f}GB, Reserved: {memory_reserved:.2f}GB")
-            print("=" * 45)
+            print("=" * 50)
+        
+        # 時間估算相關變數
+        estimate_frequency = 100  # 每100個epoch計算一次預估時間
         
         for epoch_id in range(num_epoch):
+            # 記錄epoch開始時間
+            if self.rank == 0:
+                self.epoch_start_time = time.time()
+            
             # 恢復原有的動態凍結邏輯
             if epoch_id != 0 and epoch_id % 10000 == 0:
                 self.defreeze_evm_net(epoch_id)
@@ -575,9 +607,35 @@ class PysicsInformedNeuralNetwork:
             if scheduler:
                 scheduler.step()
 
+            # 時間追蹤和預估（只在rank 0執行）
+            if self.rank == 0:
+                epoch_end_time = time.time()
+                epoch_time = epoch_end_time - self.epoch_start_time
+                self.epoch_times.append(epoch_time)
+                
+                # 記錄到TensorBoard
+                if self.tb_writer is not None:
+                    global_step = self.global_step_offset + epoch_id
+                    
+                    self.tb_writer.add_scalar('Loss/Total', epoch_loss, global_step)
+                    self.tb_writer.add_scalar('Loss/Equation', epoch_losses[0], global_step)
+                    self.tb_writer.add_scalar('Loss/Boundary', epoch_losses[1], global_step)
+                    self.tb_writer.add_scalar('Training/LearningRate', self.opt.param_groups[0]['lr'], global_step)
+                    self.tb_writer.add_scalar('Training/EpochTime', epoch_time, global_step)
+                    self.tb_writer.add_scalar('Training/Alpha_EVM', self.alpha_evm, global_step)
+                    
+                    # GPU記憶體使用
+                    if torch.cuda.is_available():
+                        memory_allocated = torch.cuda.memory_allocated(self.device) / 1024**3
+                        self.tb_writer.add_scalar('System/GPU_Memory_GB', memory_allocated, global_step)
+        
+        # 階段結束後更新global step offset
+        if self.rank == 0:
+            self.global_step_offset += num_epoch
+
             # 只在rank 0打印和保存（不需要平均，因為沒有步驟累積）
             if self.rank == 0 and (epoch_id == 0 or (epoch_id + 1) % 100 == 0):
-                self.print_log_full_batch(epoch_loss, epoch_losses, epoch_id, num_epoch, actual_data_points)
+                self.print_log_full_batch_with_time_estimate(epoch_loss, epoch_losses, epoch_id, num_epoch, actual_data_points)
 
             if self.rank == 0 and (epoch_id == 0 or epoch_id % self.checkpoint_freq == 0):
                 saved_ckpt = 'model_cavity_loop%d.pth' % (epoch_id)
@@ -585,6 +643,11 @@ class PysicsInformedNeuralNetwork:
                 hidden_size = self.hidden_size
                 N_f = self.N_f
                 self.save(saved_ckpt, N_HLayer=layers, N_neu=hidden_size, N_f=N_f)
+        
+        # 階段結束後更新global step offset
+        if self.rank == 0:
+            self.global_step_offset += num_epoch
+    
     def freeze_evm_net(self, epoch_id):
         """
         凍結EVM網路參數 - 使用static_graph=True避免DDP bucket重建問題
@@ -636,6 +699,55 @@ class PysicsInformedNeuralNetwork:
         
         if self.rank == 0:
             print(f"  Active parameters: {len(all_params)} (net + net_1)")
+
+    def print_log_full_batch_with_time_estimate(self, loss, losses, epoch_id, num_epoch, data_points):
+        """打印訓練日誌包含時間預估功能"""
+        current_lr = self.opt.param_groups[0]['lr']
+        
+        # 計算時間統計
+        if len(self.epoch_times) > 0:
+            avg_epoch_time = np.mean(self.epoch_times[-100:])  # 使用最近100個epoch的平均時間
+            
+            # 預估剩餘時間
+            remaining_epochs = num_epoch - (epoch_id + 1)
+            estimated_remaining_time = remaining_epochs * avg_epoch_time
+            
+            # 預估階段完成時間
+            stage_elapsed = time.time() - self.stage_start_time
+            stage_progress = (epoch_id + 1) / num_epoch
+            stage_eta = stage_elapsed / stage_progress - stage_elapsed if stage_progress > 0 else 0
+            
+            # 格式化時間顯示
+            def format_time(seconds):
+                if seconds < 60:
+                    return f"{seconds:.1f}s"
+                elif seconds < 3600:
+                    return f"{seconds//60:.0f}m {seconds%60:.0f}s"
+                elif seconds < 86400:
+                    return f"{seconds//3600:.0f}h {(seconds%3600)//60:.0f}m"
+                else:
+                    return f"{seconds//86400:.0f}d {(seconds%86400)//3600:.0f}h"
+            
+            print(f"{'='*80}")
+            print(f"🔥 {self.current_stage} Training Progress")
+            print(f"   Epoch: {epoch_id + 1:,} / {num_epoch:,} ({(epoch_id + 1)/num_epoch*100:.1f}%)")
+            print(f"   Data Points: {data_points:,} | Learning Rate: {current_lr:.2e}")
+            print(f"   Loss - Total: {loss:.3e} | Equation: {losses[0]:.3e} | Boundary: {losses[1]:.3e}")
+            print(f"⏱️  Time - Avg/Epoch: {avg_epoch_time:.2f}s | Stage ETA: {format_time(stage_eta)}")
+            print(f"   Stage Elapsed: {format_time(stage_elapsed)} | Remaining: {format_time(estimated_remaining_time)}")
+            
+            # GPU記憶體狀態
+            if torch.cuda.is_available():
+                memory_allocated = torch.cuda.memory_allocated(self.device) / 1024**3
+                memory_reserved = torch.cuda.memory_reserved(self.device) / 1024**3
+                print(f"💾 GPU Memory: {memory_allocated:.2f}GB allocated / {memory_reserved:.2f}GB reserved")
+            
+            print(f"{'='*80}")
+        else:
+            # 初始epoch，無法預估時間
+            print(f"🔥 {self.current_stage} - Epoch {epoch_id + 1:,}/{num_epoch:,}")
+            print(f"   Learning Rate: {current_lr:.2e} | Data Points: {data_points:,}")
+            print(f"   Loss - Total: {loss:.3e} | Equation: {losses[0]:.3e} | Boundary: {losses[1]:.3e}")
 
     def print_log_full_batch(self, loss, losses, epoch_id, num_epoch, data_points):
         current_lr = self.opt.param_groups[0]['lr']

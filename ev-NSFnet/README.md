@@ -68,18 +68,44 @@ python test.py
 
 ### 關鍵參數
 - **Reynolds數**: 3000, 5000
-- **訓練點數**: 100,000個隨機點
-- **批次大小**: 可配置的micro-batch訓練
-- **學習率**: 0.001 (Adam優化器)
+- **訓練點數**: 120,000個隨機點 (完整批次訓練)
+- **總訓練輪數**: 3,000,000 epochs (分6個階段)
+- **學習率**: 動態調整 (1e-3 → 2e-6)
 - **權重係數**:
   - 邊界條件: 10.0
   - 方程約束: 1.0  
-  - EVM正則化: 0.03
+  - EVM正則化: 0.05 → 0.002 (逐漸減少)
 
-### 多階段訓練
-- **階段1**: 凍結EVM網路，僅訓練主網路
-- **階段2**: 每10,000個epoch解凍EVM網路
-- **梯度策略**: 每個micro-batch立即更新參數
+### 🕐 時間預估功能
+- **實時預估**: 每100個epoch計算剩餘時間
+- **階段進度**: 顯示當前階段完成度和預計完成時間
+- **總體追蹤**: 追蹤完整3M epochs的總訓練時間
+- **效率監控**: 每epoch平均時間統計
+
+### 📊 TensorBoard集成
+- **損失追蹤**: 總損失、方程損失、邊界損失
+- **系統監控**: GPU記憶體使用、學習率變化
+- **訓練效率**: 每epoch時間、Alpha_EVM參數變化
+- **實時可視化**: `tensorboard --logdir=runs`
+
+### 多階段訓練策略
+```python
+# 6個訓練階段，每階段500,000 epochs
+training_stages = [
+    (0.05, 500000, 1e-3, "Stage 1"),   # 初始大Alpha_EVM
+    (0.03, 500000, 2e-4, "Stage 2"),   # 逐漸減少
+    (0.01, 500000, 4e-5, "Stage 3"),   # 精細調整
+    (0.005, 500000, 1e-5, "Stage 4"),  # 更精細
+    (0.002, 500000, 2e-6, "Stage 5"),  # 最終調整
+    (0.002, 500000, 2e-6, "Stage 6")   # 穩定收斂
+]
+```
+
+### 💡 完整批次訓練
+- **無批次分割**: 每個epoch使用全部120,000個訓練點
+- **記憶體優化**: 約0.006GB預估記憶體需求
+- **GPU利用率**: 最大化GPU計算效率
+- **收斂穩定性**: 避免批次間的梯度噪音
 
 ## 📊 分散式訓練
 
@@ -143,17 +169,37 @@ ev-NSFnet/
 ## 🛠️ 命令參考
 
 ```bash
-# 訓練命令
+# 完整訓練 (3M epochs)
 python train.py
 
 # 測試命令  
 python test.py
 
-# 批次效率測試
+# 時間預估測試
+python test_time_estimation.py
+
+# 批次效率測試 (在 batch_size_test/ 目錄)
+cd batch_size_test/
 python batch_efficiency_test.py
 
 # 執行SLURM作業
 sbatch train.sh
+
+# 查看TensorBoard訓練日誌
+tensorboard --logdir=runs
+```
+
+### 🔍 監控與診斷
+
+```bash
+# 檢查GPU使用狀態
+nvidia-smi
+
+# 監控訓練進度 (輸出包含時間預估)
+tail -f slurm-*.out
+
+# 查看TensorBoard訓練曲線
+tensorboard --logdir=runs --host=0.0.0.0 --port=6006
 ```
 
 ## 📝 引用

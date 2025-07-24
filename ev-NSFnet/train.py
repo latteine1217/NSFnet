@@ -6,6 +6,7 @@ from tools import *
 import cavity_data as cavity
 import pinn_solver as psolver
 import warnings
+import time
 
 # 設定環境變數來避免DDP錯誤
 os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'DETAIL'
@@ -118,6 +119,7 @@ def train(net_params=None):
         x_star, y_star, u_star, v_star, p_star = dataloader.loading_evaluate_data(filename)
 
         # Training stages with different alpha_evm values
+        # 總共 3,000,000 epochs，分6個階段
         training_stages = [
             (0.05, 500000, 1e-3, "Stage 1"),
             (0.03, 500000, 2e-4, "Stage 2"),
@@ -126,20 +128,47 @@ def train(net_params=None):
             (0.002, 500000, 2e-6, "Stage 5"),
             (0.002, 500000, 2e-6, "Stage 6")
         ]
+        
+        total_epochs = sum([stage[1] for stage in training_stages])
+        if not is_distributed or PINN.rank == 0:
+            print(f"🚀 開始完整訓練：總共 {total_epochs:,} epochs，分 {len(training_stages)} 個階段")
+            print(f"   預估完成時間將在訓練開始後計算...")
+            print("=" * 60)
 
         for alpha, epochs, lr, stage_name in training_stages:
             if not is_distributed or PINN.rank == 0:
-                print(f"Starting Training {stage_name}: alpha_evm={alpha}")
+                print(f"\n🎯 Starting {stage_name}: alpha_evm={alpha}, epochs={epochs:,}, lr={lr:.1e}")
             
             PINN.current_stage = stage_name
             PINN.set_alpha_evm(alpha)
             PINN.train(num_epoch=epochs, lr=lr)
             
             if not is_distributed or PINN.rank == 0:
+                print(f"\n📊 {stage_name} 完成，進行評估...")
                 PINN.evaluate(x_star, y_star, u_star, v_star, p_star)
 
         if not is_distributed or PINN.rank == 0:
-            print("Training completed successfully!")
+            # 計算總訓練時間
+            if PINN.training_start_time is not None:
+                total_training_time = time.time() - PINN.training_start_time
+                def format_time(seconds):
+                    if seconds < 3600:
+                        return f"{seconds//60:.0f}分 {seconds%60:.0f}秒"
+                    elif seconds < 86400:
+                        return f"{seconds//3600:.0f}小時 {(seconds%3600)//60:.0f}分"
+                    else:
+                        return f"{seconds//86400:.0f}天 {(seconds%86400)//3600:.0f}小時"
+                
+                print(f"\n🎉 ===== 訓練完成！=====")
+                print(f"   總訓練時間: {format_time(total_training_time)}")
+                print(f"   總 epochs: {total_epochs:,}")
+                print(f"   平均每 epoch: {total_training_time/total_epochs:.3f}秒")
+                print("=" * 40)
+            
+            # 關閉TensorBoard writer
+            if hasattr(PINN, 'tb_writer') and PINN.tb_writer is not None:
+                PINN.tb_writer.close()
+                print(f"📊 TensorBoard 日誌已保存")
 
     except Exception as e:
         print(f"Training failed: {e}")
