@@ -844,29 +844,28 @@ class PysicsInformedNeuralNetwork:
                     memory_ok = self.memory_manager.monitor_training_memory(epoch_id, epoch_loss)
                     if not memory_ok:
                         self.logger.critical("💾 記憶體使用危險，建議調整訓練參數或重啟訓練")
-        
-        # 只在rank 0打印和保存（不需要平均，因為沒有步驟累積）
-        if self.rank == 0 and (epoch_id == 0 or (epoch_id + 1) % 100 == 0):
-            self.print_log_full_batch_with_time_estimate(epoch_loss, epoch_losses, epoch_id, num_epoch, actual_data_points)
             
-            # 每1000個epoch輸出健康和記憶體報告
-            if epoch_id % 1000 == 0:
-                if self.health_monitor:
-                    self.health_monitor.log_health_report()
-                if self.memory_manager:
-                    self.memory_manager.log_memory_report()
+            # 每1000個epoch輸出一次訓練狀況，首個epoch也要輸出
+            if self.rank == 0 and (epoch_id == 0 or (epoch_id + 1) % 1000 == 0 or epoch_id == num_epoch - 1):
+                self.print_log_full_batch_with_time_estimate(epoch_loss, epoch_losses, epoch_id, num_epoch, actual_data_points)
+                
+                # 每1000個epoch輸出健康和記憶體報告
+                if epoch_id == 0 or epoch_id % 1000 == 0:
+                    if self.health_monitor:
+                        self.health_monitor.log_health_report()
+                    if self.memory_manager:
+                        self.memory_manager.log_memory_report()
 
-        if self.rank == 0 and (epoch_id == 0 or epoch_id % self.checkpoint_freq == 0):
-            saved_ckpt = 'model_cavity_loop%d.pth' % (epoch_id)
-            layers = self.layers
-            hidden_size = self.hidden_size
-            N_f = self.N_f
-            self.save(saved_ckpt, N_HLayer=layers, N_neu=hidden_size, N_f=N_f)
-            
-            # 更新檢查點時間
-            if self.health_monitor:
-                self.health_monitor.last_checkpoint_time = time.time()
-        
+            if self.rank == 0 and (epoch_id == 0 or epoch_id % self.checkpoint_freq == 0):
+                saved_ckpt = 'model_cavity_loop%d.pth' % (epoch_id)
+                layers = self.layers
+                hidden_size = self.hidden_size
+                N_f = self.N_f
+                self.save(saved_ckpt, N_HLayer=layers, N_neu=hidden_size, N_f=N_f)
+                
+                # 更新檢查點時間
+                if self.health_monitor:
+                    self.health_monitor.last_checkpoint_time = time.time()        
         # 階段結束後更新global step offset
         if self.rank == 0:
             self.global_step_offset += num_epoch
@@ -1039,21 +1038,36 @@ class PysicsInformedNeuralNetwork:
             raise e
 
     def print_log_full_batch_with_time_estimate(self, loss, losses, epoch_id, num_epoch, data_points):
-        """打印訓練日誌包含時間預估功能"""
+        """打印訓練日誌包含詳細時間預估和收斂分析"""
         current_lr = self.opt.param_groups[0]['lr']
         
         # 計算時間統計
-        if len(self.epoch_times) > 0:
-            avg_epoch_time = np.mean(self.epoch_times[-100:])  # 使用最近100個epoch的平均時間
+        if len(self.epoch_times) > 10:  # 至少需要10個epoch來計算可靠的預估
+            # 使用最近50個epoch的平均時間，更準確反映當前速度
+            recent_epochs = min(50, len(self.epoch_times))
+            avg_epoch_time = np.mean(self.epoch_times[-recent_epochs:])
             
             # 預估剩餘時間
             remaining_epochs = num_epoch - (epoch_id + 1)
             estimated_remaining_time = remaining_epochs * avg_epoch_time
             
-            # 預估階段完成時間
+            # 計算階段總時間預估
             stage_elapsed = time.time() - self.stage_start_time
             stage_progress = (epoch_id + 1) / num_epoch
-            stage_eta = stage_elapsed / stage_progress - stage_elapsed if stage_progress > 0 else 0
+            stage_total_estimated = stage_elapsed / stage_progress if stage_progress > 0 else 0
+            stage_eta = stage_total_estimated - stage_elapsed
+            
+            # 計算整個訓練的進度（如果是多階段訓練）
+            if hasattr(self, 'training_start_time') and self.training_start_time:
+                total_training_time = time.time() - self.training_start_time
+            else:
+                total_training_time = stage_elapsed
+            
+            # 計算epoch處理速度
+            epochs_per_minute = 60.0 / avg_epoch_time if avg_epoch_time > 0 else 0
+            
+            # 損失收斂分析
+            convergence_info = self._analyze_convergence_trend(losses)
             
             # 格式化時間顯示
             def format_time(seconds):
@@ -1062,30 +1076,111 @@ class PysicsInformedNeuralNetwork:
                 elif seconds < 3600:
                     return f"{seconds//60:.0f}m {seconds%60:.0f}s"
                 elif seconds < 86400:
-                    return f"{seconds//3600:.0f}h {(seconds%3600)//60:.0f}m"
+                    hours = seconds // 3600
+                    minutes = (seconds % 3600) // 60
+                    return f"{hours:.0f}h {minutes:.0f}m"
                 else:
-                    return f"{seconds//86400:.0f}d {(seconds%86400)//3600:.0f}h"
+                    days = seconds // 86400
+                    hours = (seconds % 86400) // 3600
+                    return f"{days:.0f}d {hours:.0f}h"
             
-            print(f"{'='*80}")
-            print(f"🔥 {self.current_stage} Training Progress")
-            print(f"   Epoch: {epoch_id + 1:,} / {num_epoch:,} ({(epoch_id + 1)/num_epoch*100:.1f}%)")
-            print(f"   Data Points: {data_points:,} | Learning Rate: {current_lr:.2e}")
-            print(f"   Loss - Total: {loss:.3e} | Equation: {losses[0]:.3e} | Boundary: {losses[1]:.3e}")
-            print(f"⏱️  Time - Avg/Epoch: {avg_epoch_time:.2f}s | Stage ETA: {format_time(stage_eta)}")
-            print(f"   Stage Elapsed: {format_time(stage_elapsed)} | Remaining: {format_time(estimated_remaining_time)}")
+            # 顯示詳細訓練報告
+            print(f"\n{'='*100}")
+            print(f"🔥 {self.current_stage} | 訓練進度報告")
+            print(f"{'='*100}")
             
-            # GPU記憶體狀態
+            # 進度信息
+            progress_bar_length = 40
+            filled_length = int(progress_bar_length * (epoch_id + 1) / num_epoch)
+            bar = '█' * filled_length + '-' * (progress_bar_length - filled_length)
+            
+            print(f"📊 進度: [{bar}] {(epoch_id + 1)/num_epoch*100:.1f}%")
+            print(f"   Epoch: {epoch_id + 1:,} / {num_epoch:,}")
+            print(f"   資料點: {data_points:,} | 學習率: {current_lr:.2e}")
+            
+            # 損失信息
+            print(f"\n📈 損失狀況:")
+            print(f"   總損失:   {loss:.3e} {convergence_info['trend_symbol']}")
+            print(f"   方程損失: {losses[0]:.3e}")
+            print(f"   邊界損失: {losses[1]:.3e}")
+            print(f"   收斂趨勢: {convergence_info['description']}")
+            
+            # 時間分析
+            print(f"\n⏰ 時間分析:")
+            print(f"   單epoch平均: {avg_epoch_time:.2f}s ({epochs_per_minute:.1f} epochs/min)")
+            print(f"   階段已耗時: {format_time(stage_elapsed)}")
+            print(f"   階段預估剩餘: {format_time(stage_eta)}")
+            print(f"   階段總預估: {format_time(stage_total_estimated)}")
+            print(f"   累計訓練時間: {format_time(total_training_time)}")
+            
+            # 系統狀態
             if torch.cuda.is_available():
                 memory_allocated = torch.cuda.memory_allocated(self.device) / 1024**3
                 memory_reserved = torch.cuda.memory_reserved(self.device) / 1024**3
-                print(f"💾 GPU Memory: {memory_allocated:.2f}GB allocated / {memory_reserved:.2f}GB reserved")
+                total_memory = torch.cuda.get_device_properties(self.device).total_memory / 1024**3
+                memory_usage_percent = (memory_allocated / total_memory) * 100
+                
+                memory_status = "🟢 正常" if memory_usage_percent < 70 else "🟡 中等" if memory_usage_percent < 85 else "🔴 高"
+                
+                print(f"\n💾 系統狀態:")
+                print(f"   GPU記憶體: {memory_allocated:.2f}GB / {total_memory:.2f}GB ({memory_usage_percent:.1f}%) {memory_status}")
+                print(f"   保留記憶體: {memory_reserved:.2f}GB")
             
-            print(f"{'='*80}")
+            # 訓練效率指標
+            data_points_per_second = data_points / avg_epoch_time if avg_epoch_time > 0 else 0
+            print(f"\n🚀 效率指標:")
+            print(f"   資料處理速度: {data_points_per_second:,.0f} points/sec")
+            print(f"   Alpha EVM: {self.alpha_evm}")
+            
+            print(f"{'='*100}\n")
+            
         else:
-            # 初始epoch，無法預估時間
-            print(f"🔥 {self.current_stage} - Epoch {epoch_id + 1:,}/{num_epoch:,}")
-            print(f"   Learning Rate: {current_lr:.2e} | Data Points: {data_points:,}")
-            print(f"   Loss - Total: {loss:.3e} | Equation: {losses[0]:.3e} | Boundary: {losses[1]:.3e}")
+            # 初始幾個epoch，資訊較少
+            print(f"\n{'='*80}")
+            print(f"🔥 {self.current_stage} - 初始化階段")
+            print(f"   Epoch: {epoch_id + 1:,} / {num_epoch:,}")
+            print(f"   學習率: {current_lr:.2e} | 資料點: {data_points:,}")
+            print(f"   損失 - 總: {loss:.3e} | 方程: {losses[0]:.3e} | 邊界: {losses[1]:.3e}")
+            print(f"   (時間預估將在第10個epoch後提供)")
+            print(f"{'='*80}\n")
+
+    def _analyze_convergence_trend(self, current_losses):
+        """分析損失收斂趨勢"""
+        # 如果歷史數據不足，返回默認信息
+        if not hasattr(self, 'loss_history'):
+            self.loss_history = []
+        
+        # 記錄當前損失
+        current_total_loss = current_losses[0] + current_losses[1]
+        self.loss_history.append(current_total_loss)
+        
+        # 保持最近100個損失記錄
+        if len(self.loss_history) > 100:
+            self.loss_history = self.loss_history[-100:]
+        
+        if len(self.loss_history) < 10:
+            return {"trend_symbol": "📊", "description": "收集數據中..."}
+        
+        # 分析最近的趨勢
+        recent_losses = self.loss_history[-10:]
+        earlier_losses = self.loss_history[-20:-10] if len(self.loss_history) >= 20 else self.loss_history[:-10]
+        
+        if len(earlier_losses) > 0:
+            recent_avg = np.mean(recent_losses)
+            earlier_avg = np.mean(earlier_losses)
+            
+            improvement_ratio = (earlier_avg - recent_avg) / earlier_avg if earlier_avg > 0 else 0
+            
+            if improvement_ratio > 0.1:
+                return {"trend_symbol": "📉", "description": "快速收斂中"}
+            elif improvement_ratio > 0.01:
+                return {"trend_symbol": "📊", "description": "穩定收斂中"}
+            elif improvement_ratio > -0.01:
+                return {"trend_symbol": "➡️", "description": "緩慢收斂/平穩"}
+            else:
+                return {"trend_symbol": "📈", "description": "可能發散，需注意"}
+        
+        return {"trend_symbol": "📊", "description": "趨勢分析中..."}
 
     def print_log_full_batch(self, loss, losses, epoch_id, num_epoch, data_points):
         current_lr = self.opt.param_groups[0]['lr']
