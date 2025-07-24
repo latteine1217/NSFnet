@@ -514,6 +514,16 @@ class PysicsInformedNeuralNetwork:
         # 創建DataLoader進行批次處理
         actual_data_points = self.x_f.shape[0]
         
+        # 檢查原始數據設備位置
+        if self.rank == 0:
+            print(f"=== Original Data Device Check ===")
+            print(f"self.x_f.device: {self.x_f.device}")
+            print(f"self.y_f.device: {self.y_f.device}")
+            print(f"self.x_f.is_cuda: {self.x_f.is_cuda}")
+            print(f"self.y_f.is_cuda: {self.y_f.is_cuda}")
+            print(f"Expected device: {self.device}")
+            print("=" * 40)
+        
         # 創建TensorDataset
         dataset = TensorDataset(self.x_f, self.y_f)
         
@@ -578,9 +588,28 @@ class PysicsInformedNeuralNetwork:
             
             # 使用DataLoader進行批次處理
             for step, (batch_x_f, batch_y_f) in enumerate(dataloader):
-                # 設置當前批次數據
-                self.x_f = batch_x_f.to(self.device)
-                self.y_f = batch_y_f.to(self.device)
+                # 檢查數據設備位置（只在第一個batch和rank 0打印）
+                if self.rank == 0 and step == 0:
+                    print(f"=== Device Check (Epoch {epoch_id}, Step {step}) ===")
+                    print(f"batch_x_f.device: {batch_x_f.device}")
+                    print(f"batch_y_f.device: {batch_y_f.device}")
+                    print(f"Expected device: {self.device}")
+                    print(f"batch_x_f.is_cuda: {batch_x_f.is_cuda}")
+                    print(f"batch_y_f.is_cuda: {batch_y_f.is_cuda}")
+                    print("=" * 45)
+                
+                # 智能設備檢查和傳輸
+                if batch_x_f.device != self.device:
+                    if self.rank == 0 and step == 0:
+                        print(f"WARNING: Moving batch from {batch_x_f.device} to {self.device}")
+                    self.x_f = batch_x_f.to(self.device)
+                    self.y_f = batch_y_f.to(self.device)
+                else:
+                    if self.rank == 0 and step == 0:
+                        print(f"GOOD: Batch already on {self.device}")
+                    # 直接賦值，避免不必要的.to()調用
+                    self.x_f = batch_x_f
+                    self.y_f = batch_y_f
                 
                 # 計算損失
                 with torch.enable_grad():
