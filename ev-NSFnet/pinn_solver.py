@@ -18,6 +18,7 @@ import os
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import TensorDataset, DataLoader, DistributedSampler
 import scipy.io
 import numpy as np
 from net import FCNet
@@ -92,18 +93,16 @@ class PysicsInformedNeuralNetwork:
 
         # Wrap models with DDP only if in distributed mode
         if self.world_size > 1:
-            # 使用static_graph=True避免動態參數凍結時的bucket重建問題
+            # 使用static_graph=True會自動檢測未使用參數，不需要find_unused_parameters=True
             self.net = DDP(self.net, 
                            device_ids=[self.local_rank], 
                            output_device=self.local_rank,
-                           find_unused_parameters=True,   # 允許部分參數未使用
                            broadcast_buffers=True,        # 確保buffer同步
                            gradient_as_bucket_view=True,  # 提升記憶體效率
                            static_graph=True)             # 防止動態凍結時bucket重建
             self.net_1 = DDP(self.net_1, 
                              device_ids=[self.local_rank], 
                              output_device=self.local_rank,
-                             find_unused_parameters=True,   # 允許部分參數未使用
                              broadcast_buffers=True,        # 確保buffer同步
                              gradient_as_bucket_view=True,  # 提升記憶體效率
                              static_graph=True)             # 防止動態凍結時bucket重建
