@@ -90,36 +90,43 @@ class PysicsInformedNeuralNetwork:
         self.net_1 = self.initialize_NN(
                 num_ins=num_ins, num_outs=num_outs_1, num_layers=layers_1, hidden_size=hidden_size_1).to(self.device)
 
-        # Wrap models with DDP
-        self.net = DDP(self.net, 
-                       device_ids=[self.local_rank], 
-                       output_device=self.local_rank,
-                       find_unused_parameters=False,
-                       broadcast_buffers=False)
-        self.net_1 = DDP(self.net_1, 
-                         device_ids=[self.local_rank], 
-                         output_device=self.local_rank,
-                         find_unused_parameters=False,
-                         broadcast_buffers=False)
+        # Wrap models with DDP only if in distributed mode
+        if self.world_size > 1:
+            self.net = DDP(self.net, 
+                           device_ids=[self.local_rank], 
+                           output_device=self.local_rank,
+                           find_unused_parameters=True,
+                           broadcast_buffers=True)
+            self.net_1 = DDP(self.net_1, 
+                             device_ids=[self.local_rank], 
+                             output_device=self.local_rank,
+                             find_unused_parameters=True,
+                             broadcast_buffers=True)
 
         if net_params:
             if self.rank == 0:
                 print(f"Loading net params from {net_params}")
             load_params = torch.load(net_params, map_location=self.device)
-            self.net.module.load_state_dict(load_params)
+            if hasattr(self.net, 'module'):
+                self.net.module.load_state_dict(load_params)
+            else:
+                self.net.load_state_dict(load_params)
 
         if net_params_1:
             if self.rank == 0:
                 print(f"Loading net_1 params from {net_params_1}")
             load_params_1 = torch.load(net_params_1, map_location=self.device)
-            self.net_1.module.load_state_dict(load_params_1)
+            if hasattr(self.net_1, 'module'):
+                self.net_1.module.load_state_dict(load_params_1)
+            else:
+                self.net_1.load_state_dict(load_params_1)
 
         # 初始化 vis_t 相關變數
         self.vis_t = None
         self.vis_t_minus = None
 
         self.opt = torch.optim.Adam(
-            list(self.net.parameters())+list(self.net_1.parameters()),
+            list(self.get_model_parameters(self.net))+list(self.get_model_parameters(self.net_1)),
             lr=learning_rate,
             weight_decay=0.0) if not opt else opt
 
@@ -128,6 +135,20 @@ class PysicsInformedNeuralNetwork:
             print(f"  World size: {self.world_size}")
             print(f"  Rank: {self.rank}")
             print(f"  Local rank: {self.local_rank}")
+
+    def get_model_parameters(self, model):
+        """Get model parameters considering DDP wrapper"""
+        if hasattr(model, 'module'):
+            return model.module.parameters()
+        else:
+            return model.parameters()
+
+    def get_model(self, model):
+        """Get underlying model considering DDP wrapper"""
+        if hasattr(model, 'module'):
+            return model.module
+        else:
+            return model
             print(f"  Device: {self.device}")
             print(f"  DDP find_unused_parameters: True (enabled for dynamic network freezing)")
 
@@ -260,7 +281,9 @@ class PysicsInformedNeuralNetwork:
     def neural_net_u(self, x, y):
         X = torch.cat((x, y), dim=1)
         
-        # 不強制修改梯度設置，保持輸入張量的原始設置
+        # 確保輸入張量在正確的設備上
+        X = X.to(self.device)
+        
         # 使用上下文管理器確保梯度正確傳播
         with torch.enable_grad():
             uvp = self.net(X)
@@ -275,7 +298,9 @@ class PysicsInformedNeuralNetwork:
     def neural_net_equations(self, x, y):
         X = torch.cat((x, y), dim=1)
         
-        # 不強制修改梯度設置，保持輸入張量的原始設置  
+        # 確保輸入張量在正確的設備上
+        X = X.to(self.device)
+        
         # 使用上下文管理器確保梯度正確傳播
         with torch.enable_grad():
             uvp = self.net(X)
@@ -788,8 +813,8 @@ class PysicsInformedNeuralNetwork:
             os.makedirs(save_results_to)
 
         # Save model state dict without DDP wrapper
-        torch.save(self.net.module.state_dict(), save_results_to+filename)
-        torch.save(self.net_1.module.state_dict(), save_results_to+filename+'_evm')
+        torch.save(self.get_model(self.net).state_dict(), save_results_to+filename)
+        torch.save(self.get_model(self.net_1).state_dict(), save_results_to+filename+'_evm')
 
     def divergence(self, x_star, y_star):
         (self.eq1_pred, self.eq2_pred,
