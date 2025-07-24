@@ -29,18 +29,45 @@ def setup_distributed():
         os.environ['RANK'] = '0'
         os.environ['LOCAL_RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
+        return False  # 非分布式模式
+    
+    # 初始化分布式進程組
+    try:
+        if not dist.is_initialized():
+            print("🔗 初始化分布式訓練...")
+            dist.init_process_group(backend='nccl')
+            
+            rank = dist.get_rank()
+            world_size = dist.get_world_size()
+            local_rank = int(os.environ['LOCAL_RANK'])
+            
+            print(f"📡 Rank {rank}/{world_size}, Local Rank {local_rank}")
+            
+            # 設定CUDA設備
+            if torch.cuda.is_available():
+                torch.cuda.set_device(local_rank)
+                
+        return True  # 分布式模式
+        
+    except Exception as e:
+        print(f"❌ 分布式初始化失敗: {e}")
+        print("💻 退回單GPU模式")
+        os.environ['RANK'] = '0'
+        os.environ['LOCAL_RANK'] = '0'
+        os.environ['WORLD_SIZE'] = '1'
+        return False
 
 def cleanup_distributed():
     """清理分布式訓練環境"""
-    if torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 def main():
     """主訓練函數 - 使用配置系統"""
     args = parse_args()
     
     # 設置分布式環境
-    setup_distributed()
+    is_distributed = setup_distributed()
     
     try:
         # 載入配置
@@ -102,7 +129,6 @@ def main():
             training_stages.append((alpha, epochs, lr, stage_name))
         
         total_epochs = sum([stage[1] for stage in training_stages])
-        is_distributed = int(os.environ.get('WORLD_SIZE', 1)) > 1
         
         if not is_distributed or PINN.rank == 0:
             print(f"🚀 開始完整訓練：總共 {total_epochs:,} epochs，分 {len(training_stages)} 個階段")
