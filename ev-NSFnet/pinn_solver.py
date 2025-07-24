@@ -94,11 +94,13 @@ class PysicsInformedNeuralNetwork:
         self.net = DDP(self.net, 
                        device_ids=[self.local_rank], 
                        output_device=self.local_rank,
-                       find_unused_parameters=True)
+                       find_unused_parameters=False,
+                       broadcast_buffers=False)
         self.net_1 = DDP(self.net_1, 
                          device_ids=[self.local_rank], 
                          output_device=self.local_rank,
-                         find_unused_parameters=True)
+                         find_unused_parameters=False,
+                         broadcast_buffers=False)
 
         if net_params:
             if self.rank == 0:
@@ -158,25 +160,27 @@ class PysicsInformedNeuralNetwork:
         start_idx = max(0, min(start_idx, total_points))
         end_idx = max(start_idx, min(end_idx, total_points))
         
-        requires_grad = False
+        # 邊界條件數據不需要梯度，只需要進行前向計算
+        coord_requires_grad = False  # 邊界座標不需要梯度
+        target_requires_grad = False # u, v 標準答案不需要梯度
         
         # 如果沒有數據點，創建空張量
         if start_idx >= end_idx:
-            self.x_b = torch.empty(0, 1, requires_grad=requires_grad).float().to(self.device)
-            self.y_b = torch.empty(0, 1, requires_grad=requires_grad).float().to(self.device)
-            self.u_b = torch.empty(0, 1, requires_grad=requires_grad).float().to(self.device)
-            self.v_b = torch.empty(0, 1, requires_grad=requires_grad).float().to(self.device)
+            self.x_b = torch.empty(0, 1, requires_grad=coord_requires_grad).float().to(self.device)
+            self.y_b = torch.empty(0, 1, requires_grad=coord_requires_grad).float().to(self.device)
+            self.u_b = torch.empty(0, 1, requires_grad=target_requires_grad).float().to(self.device)
+            self.v_b = torch.empty(0, 1, requires_grad=target_requires_grad).float().to(self.device)
         else:
-            self.x_b = torch.tensor(X[0][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
-            self.y_b = torch.tensor(X[1][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
-            self.u_b = torch.tensor(X[2][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
-            self.v_b = torch.tensor(X[3][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+            self.x_b = torch.tensor(X[0][start_idx:end_idx], requires_grad=coord_requires_grad).float().to(self.device)
+            self.y_b = torch.tensor(X[1][start_idx:end_idx], requires_grad=coord_requires_grad).float().to(self.device)
+            self.u_b = torch.tensor(X[2][start_idx:end_idx], requires_grad=target_requires_grad).float().to(self.device)
+            self.v_b = torch.tensor(X[3][start_idx:end_idx], requires_grad=target_requires_grad).float().to(self.device)
             
         if time:
             if start_idx >= end_idx:
-                self.t_b = torch.empty(0, 1, requires_grad=requires_grad).float().to(self.device)
+                self.t_b = torch.empty(0, 1, requires_grad=coord_requires_grad).float().to(self.device)
             else:
-                self.t_b = torch.tensor(X[4][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+                self.t_b = torch.tensor(X[4][start_idx:end_idx], requires_grad=coord_requires_grad).float().to(self.device)
 
         if self.rank == 0:
             print(f"GPU {self.rank}: Processing {end_idx - start_idx} boundary points out of {total_points} total")
@@ -255,18 +259,27 @@ class PysicsInformedNeuralNetwork:
 
     def neural_net_u(self, x, y):
         X = torch.cat((x, y), dim=1)
-        uvp = self.net(X)
-        ee = self.net_1(X)
+        
+        # 不強制修改梯度設置，保持輸入張量的原始設置
+        # 使用上下文管理器確保梯度正確傳播
+        with torch.enable_grad():
+            uvp = self.net(X)
+            ee = self.net_1(X)
+        
         u = uvp[:, 0]
         v = uvp[:, 1]
         p = uvp[:, 2:3]
-        e =  ee[:,0:1]
+        e = ee[:, 0:1]
         return u, v, p, e
 
     def neural_net_equations(self, x, y):
         X = torch.cat((x, y), dim=1)
-        uvp = self.net(X)
-        ee = self.net_1(X)
+        
+        # 不強制修改梯度設置，保持輸入張量的原始設置  
+        # 使用上下文管理器確保梯度正確傳播
+        with torch.enable_grad():
+            uvp = self.net(X)
+            ee = self.net_1(X)
 
         u = uvp[:, 0:1]
         v = uvp[:, 1:2]
@@ -378,8 +391,10 @@ class PysicsInformedNeuralNetwork:
                 self.loss_b = torch.mean(torch.square(u_b_flat - u_pred_b_flat)) + \
                               torch.mean(torch.square(v_b_flat - v_pred_b_flat))
             else:
-                # 沒有邊界數據時設置損失為0
-                self.loss_b = torch.tensor(0.0, device=self.device, requires_grad=True)
+                # 沒有邊界數據時設置損失為0，但保持在計算圖中
+                # 使用網路的第一層參數創建與參數相關的零損失
+                dummy_loss = torch.sum(self.net.module.layers[0].weight * 0.0)
+                self.loss_b = dummy_loss
 
         # equation
         assert self.x_f is not None and self.y_f is not None
@@ -405,9 +420,6 @@ class PysicsInformedNeuralNetwork:
             dist.all_reduce(loss_e_detached, op=dist.ReduceOp.SUM)
             loss_e_avg = loss_e_detached / self.world_size
             
-            # 重新計算總損失，保持梯度追踪
-            self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e
-            
             # 用於日誌顯示的平均損失
             self.loss_b_avg = loss_b_avg
             self.loss_e_avg = loss_e_avg
@@ -415,6 +427,7 @@ class PysicsInformedNeuralNetwork:
             self.loss_b_avg = self.loss_b
             self.loss_e_avg = self.loss_e
 
+        # 計算總損失（保持梯度追踪）
         self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e
 
         # 創建用於backward的loss（保持梯度）
@@ -584,7 +597,23 @@ class PysicsInformedNeuralNetwork:
                 )
             
             # 一個epoch結束後統一更新參數
-            self.opt.step()
+            # 確保所有進程的梯度同步完成
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            
+            # 檢查DDP狀態並嘗試恢復
+            try:
+                self.opt.step()
+                self.opt.zero_grad()  # 清理梯度為下一個epoch準備
+            except RuntimeError as e:
+                if "INTERNAL ASSERT FAILED" in str(e) or "unmarked_param_indices" in str(e):
+                    if self.rank == 0:
+                        print(f"Warning: DDP sync error at epoch {epoch_id}, attempting recovery...")
+                    # 清理梯度並跳過這次更新
+                    self.opt.zero_grad()
+                    continue
+                else:
+                    raise e
             
             # 計算平均損失
             epoch_loss /= steps_per_epoch

@@ -1,7 +1,11 @@
 # AGENTS.md - Physics-Informed Neural Networks (PINNs) for NSFnet
 
 ## 角色規則
-你是一個精通Python的資深工程師，擅長的領域是Physics-Informed Neural Network (PINN)以及神經網路相關開發，也了解CFD相關工程知識。
+你是一個：
+- 精通Python的資深工程師
+- 擅長的領域是Physics-Informed Neural Network (PINN)以及神經網路相關開發
+- 了解CFD相關工程知識、GPU並行化知識
+- **最重要的**：擅長使用pytorch進行開發
 
 ## 硬體環境規則
 本專案使用Dell R740伺服器運行（Intel Xeon Gold 5118 12 Core*2/ 48 threads, 112GB memory, Nvidia P100 16GB *2）。請根據此硬體配置來審查以及設計錯誤解決方式。不要使用本地python做執行測試，需要測試的檔案請寫好後讓我自己手動運行。
@@ -13,6 +17,11 @@
 - 設定記憶體為100G
 - 使用torchrun進行分布式訓練
 - 載入MPI模組並設定相關環境變數
+
+## 專案說明
+- 這是一個使用PINNs訓練Reynold number =5000 lid-driven flow的專案，使用entropy residual計算artificial viscosity來增強訓練精度
+- 本專案使用的神經網路架構為：6(layers) * 80(neurons) + 4 * 40，主網路用來訓練navier-stoke equation, continuity equation，副網路用來訓練entropy residual 
+- residual最終會用以計算artificial viscosity帶回navier-stoke中作為人工粘滯度修正項
 
 ## Commands
 - **Train**: `python train.py` (main training script)
