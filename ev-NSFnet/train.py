@@ -122,7 +122,7 @@ def train(net_params=None):
             
             PINN.current_stage = stage_name
             PINN.set_alpha_evm(alpha)
-            PINN.train(num_epoch=epochs, lr=lr)
+            PINN.train(num_epoch=epochs, lr=lr, batchsize=batch_size)
             
             if not is_distributed or PINN.rank == 0:
                 PINN.evaluate(x_star, y_star, u_star, v_star, p_star)
