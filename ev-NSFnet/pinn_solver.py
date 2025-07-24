@@ -532,7 +532,7 @@ class PysicsInformedNeuralNetwork:
                 batch_size=self.batch_size,
                 sampler=sampler,
                 drop_last=True,
-                pin_memory=True,
+                pin_memory=False,  # 數據已在GPU上，不需要pin_memory
                 num_workers=0  # 避免多進程問題
             )
         else:
@@ -542,7 +542,7 @@ class PysicsInformedNeuralNetwork:
                 batch_size=self.batch_size,
                 shuffle=True,
                 drop_last=True,
-                pin_memory=True,
+                pin_memory=False,  # 數據已在GPU上，不需要pin_memory
                 num_workers=0
             )
         
