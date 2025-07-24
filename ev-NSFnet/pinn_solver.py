@@ -153,6 +153,20 @@ class PysicsInformedNeuralNetwork:
         self.net_1 = self.initialize_NN(
                 num_ins=num_ins, num_outs=num_outs_1, num_layers=layers_1, hidden_size=hidden_size_1).to(self.device)
 
+        # 優化：使用torch.compile加速網路推理 (PyTorch 2.x)
+        if hasattr(torch, 'compile') and torch.__version__ >= "2.0":
+            try:
+                self.net = torch.compile(self.net, mode='reduce-overhead')
+                self.net_1 = torch.compile(self.net_1, mode='reduce-overhead')
+                if self.rank == 0:
+                    self.logger.info("🚀 啟用 torch.compile 優化")
+            except Exception as e:
+                if self.rank == 0:
+                    self.logger.warning(f"torch.compile 優化失敗: {e}")
+
+        # 優化：初始化vis_t相關變數，避免重複檢查
+        self.vis_t_minus_gpu = None  # GPU版本的vis_t_minus
+
         # Wrap models with DDP only if in distributed mode
         if self.world_size > 1:
             # 使用find_unused_parameters=True支援動態參數凍結，避免使用static_graph避免警告
@@ -207,8 +221,9 @@ class PysicsInformedNeuralNetwork:
             print(f"  DDP find_unused_parameters: True (enabled for dynamic network freezing)")
 
     def init_vis_t(self):
+        """優化版本：避免不必要的CPU轉換"""
         (_,_,_,e) = self.neural_net_u(self.x_f, self.y_f)
-        self.vis_t_minus = self.alpha_evm*torch.abs(e).detach().cpu().numpy()
+        self.vis_t_minus_gpu = self.alpha_evm*torch.abs(e).detach()  # 保持在GPU上
 
     def set_boundary_data(self, X=None, time=False):
         # Split boundary data across GPUs
@@ -350,6 +365,7 @@ class PysicsInformedNeuralNetwork:
         return u, v, p, e
 
     def neural_net_equations(self, x, y):
+        """優化版本：減少重複計算和批量化梯度計算"""
         X = torch.cat((x, y), dim=1)
         
         # 確保輸入張量在正確的設備上
@@ -366,58 +382,112 @@ class PysicsInformedNeuralNetwork:
         e = ee[:, 0:1]
         self.evm = e
 
-        u_x, u_y = self.autograd(u, [x,y])
-        u_xx = self.autograd(u_x, [x])[0]
-        u_yy = self.autograd(u_y, [y])[0]
-
-        v_x, v_y = self.autograd(v, [x,y])
-        v_xx = self.autograd(v_x, [x])[0]
-        v_yy = self.autograd(v_y, [y])[0]
-
-        p_x, p_y = self.autograd(p, [x,y])
+        # 優化：批量計算所有一階梯度
+        outputs = [u, v, p]
+        grads = self.compute_gradients_batch(outputs, [x, y])
+        
+        u_x, u_y = grads[0]
+        v_x, v_y = grads[1]
+        p_x, p_y = grads[2]
+        
+        # 優化：批量計算二階梯度
+        second_order_outputs = [u_x, u_y, v_x, v_y]
+        second_order_inputs = [x, y, x, y]
+        second_grads = self.compute_second_gradients_batch(second_order_outputs, second_order_inputs)
+        
+        u_xx, u_yy, v_xx, v_yy = second_grads
 
         # Get the minum between (vis_t0, vis_t_mius(calculated with last step e))
         batch_size = x.shape[0]
-        if self.vis_t_minus is not None and self.vis_t_minus.shape[0] > 0:
-            # 確保 vis_t_minus 的形狀匹配當前批次大小
-            if self.vis_t_minus.shape[0] != batch_size:
-                # 如果尺寸不匹配，使用 vis_t0 填充或截斷
-                if self.vis_t_minus.shape[0] > batch_size:
-                    vis_t_minus_batch = self.vis_t_minus[:batch_size]
-                else:
-                    # 重複填充到當前批次大小
-                    if self.vis_t_minus.shape[0] > 0:
-                        repeat_times = (batch_size + self.vis_t_minus.shape[0] - 1) // self.vis_t_minus.shape[0]
-                        vis_t_minus_extended = np.tile(self.vis_t_minus, (repeat_times, 1))
-                        vis_t_minus_batch = vis_t_minus_extended[:batch_size]
-                    else:
-                        # 如果 vis_t_minus 為空，直接使用 vis_t0
-                        vis_t_minus_batch = np.full((batch_size, 1), self.vis_t0)
-            else:
-                vis_t_minus_batch = self.vis_t_minus
+        self.vis_t = self._compute_vis_t_optimized(batch_size, e)
             
-            vis_t0_batch = np.full_like(vis_t_minus_batch, self.vis_t0)
-            self.vis_t = torch.tensor(
-                    np.minimum(vis_t0_batch, vis_t_minus_batch)).float().to(self.device)
-        else:
-            # 創建與批次大小匹配的 vis_t0 張量
-            vis_t0_batch = np.full((batch_size, 1), self.vis_t0)
-            self.vis_t = torch.tensor(vis_t0_batch).float().to(self.device)
-            
-        # Save vis_t_minus for computing vis_t in the next step
-        self.vis_t_minus = self.alpha_evm*torch.abs(e).detach().cpu().numpy()
+        # 更新 vis_t_minus (移到GPU上避免CPU-GPU轉換)
+        self.vis_t_minus_gpu = self.alpha_evm * torch.abs(e).detach()
 
-        # NS
-        eq1 = (u*u_x + v*u_y) + p_x - (1.0/self.Re+self.vis_t)*(u_xx + u_yy)
-        eq2 = (u*v_x + v*v_y) + p_y - (1.0/self.Re+self.vis_t)*(v_xx + v_yy)
+        # NS equations - 優化：避免重複的乘法運算
+        vis_total = (1.0/self.Re + self.vis_t)
+        
+        eq1 = (u*u_x + v*u_y) + p_x - vis_total*(u_xx + u_yy)
+        eq2 = (u*v_x + v*v_y) + p_y - vis_total*(v_xx + v_yy)
         eq3 = u_x + v_y
 
         residual = (eq1*(u-0.5)+eq2*(v-0.5))-e
         return eq1, eq2, eq3, residual
 
+    def compute_gradients_batch(self, outputs: List[torch.Tensor], inputs: List[torch.Tensor]) -> List[List[torch.Tensor]]:
+        """
+        批量計算多個輸出對多個輸入的梯度，減少autograd調用次數
+        """
+        batch_gradients = []
+        
+        for output in outputs:
+            grad_outputs = [torch.ones_like(output, device=output.device)]
+            grads = torch.autograd.grad(
+                [output],
+                inputs,
+                grad_outputs=grad_outputs,
+                create_graph=True,
+                retain_graph=True,
+                allow_unused=True,
+            )
+            # 處理None梯度
+            processed_grads = [g if g is not None else torch.zeros_like(inputs[i]) for i, g in enumerate(grads)]
+            batch_gradients.append(processed_grads)
+            
+        return batch_gradients
+    
+    def compute_second_gradients_batch(self, first_grads: List[torch.Tensor], inputs: List[torch.Tensor]) -> List[torch.Tensor]:
+        """
+        批量計算二階梯度
+        """
+        second_grads = []
+        
+        for i, grad in enumerate(first_grads):
+            input_tensor = inputs[i]
+            grad_outputs = [torch.ones_like(grad, device=grad.device)]
+            second_grad = torch.autograd.grad(
+                [grad],
+                [input_tensor],
+                grad_outputs=grad_outputs,
+                create_graph=True,
+                retain_graph=True,
+                allow_unused=True,
+            )[0]
+            
+            if second_grad is None:
+                second_grad = torch.zeros_like(input_tensor)
+            second_grads.append(second_grad)
+            
+        return second_grads
+    
+    def _compute_vis_t_optimized(self, batch_size: int, e: torch.Tensor) -> torch.Tensor:
+        """
+        優化的vis_t計算，避免CPU-GPU轉換和numpy操作
+        """
+        if hasattr(self, 'vis_t_minus_gpu') and self.vis_t_minus_gpu is not None:
+            # 確保尺寸匹配
+            if self.vis_t_minus_gpu.shape[0] != batch_size:
+                if self.vis_t_minus_gpu.shape[0] > batch_size:
+                    vis_t_minus_batch = self.vis_t_minus_gpu[:batch_size]
+                else:
+                    # GPU上的重複操作
+                    repeat_times = (batch_size + self.vis_t_minus_gpu.shape[0] - 1) // self.vis_t_minus_gpu.shape[0]
+                    vis_t_minus_batch = self.vis_t_minus_gpu.repeat(repeat_times, 1)[:batch_size]
+            else:
+                vis_t_minus_batch = self.vis_t_minus_gpu
+            
+            # 在GPU上計算minimum
+            vis_t0_tensor = torch.full_like(vis_t_minus_batch, self.vis_t0)
+            vis_t = torch.minimum(vis_t0_tensor, vis_t_minus_batch)
+        else:
+            # 首次運行或沒有前一步數據
+            vis_t = torch.full((batch_size, 1), self.vis_t0, device=self.device, dtype=torch.float32)
+            
+        return vis_t
+
     def autograd(self, y: torch.Tensor, x: List[torch.Tensor]) -> List[torch.Tensor]:
         """
-        計算梯度的函數 (移除 @torch.jit.script 裝飾器)
+        計算梯度的函數 (保留原函數以兼容性)
         """
         grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(y, device=y.device)]
         grad = torch.autograd.grad(
@@ -560,6 +630,13 @@ class PysicsInformedNeuralNetwork:
         # 使用完整數據進行訓練（不使用批次處理）
         actual_data_points = self.x_f.shape[0]
         
+        # 優化：啟用混合精度訓練 (自動選擇)
+        use_amp = torch.cuda.is_available() and hasattr(torch.cuda, 'amp')
+        if use_amp:
+            scaler = torch.cuda.amp.GradScaler()
+            if self.rank == 0:
+                self.logger.info("🚀 啟用混合精度訓練 (AMP)")
+        
         # 記錄階段開始時間和啟動健康監控
         if self.rank == 0:
             self.stage_start_time = time.time()
@@ -583,7 +660,8 @@ class PysicsInformedNeuralNetwork:
                 "實際GPU數據點": f"{actual_data_points:,}",
                 "訓練模式": "全批次 (無DataLoader)",
                 "總epochs": f"{num_epoch:,}",
-                "DDP模式": "啟用" if self.world_size > 1 else "關閉"
+                "DDP模式": "啟用" if self.world_size > 1 else "關閉",
+                "混合精度": "啟用" if use_amp else "關閉"
             }
             self.logger.info("=== 訓練配置 (全批次) ===")
             for key, value in training_info.items():
@@ -613,16 +691,23 @@ class PysicsInformedNeuralNetwork:
             # 清除上一個epoch的梯度
             self.opt.zero_grad()
 
-            # 直接使用完整數據計算損失（不使用批次處理）
-            loss, losses = loss_func()
+            # 優化：使用混合精度或標準精度
+            if use_amp:
+                with torch.cuda.amp.autocast():
+                    loss, losses = loss_func()
+            else:
+                loss, losses = loss_func()
             
             # 損失值驗證和GPU記憶體檢查
             if not self.validate_loss_and_memory(loss, losses, epoch_id):
                 self.logger.critical(f"Critical error at epoch {epoch_id}, stopping training...")
                 return
             
-            # 梯度回傳
-            loss.backward()
+            # 優化：使用混合精度的梯度回傳
+            if use_amp:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
             
             # 記錄損失值
             epoch_loss = loss.detach().item()
@@ -635,10 +720,17 @@ class PysicsInformedNeuralNetwork:
             del loss
             
             # 梯度裁剪避免梯度爆炸
-            torch.nn.utils.clip_grad_norm_(
-                list(self.net.parameters()) + list(self.net_1.parameters()),
-                max_norm=1.0
-            )
+            if use_amp:
+                scaler.unscale_(self.opt)
+                torch.nn.utils.clip_grad_norm_(
+                    list(self.net.parameters()) + list(self.net_1.parameters()),
+                    max_norm=1.0
+                )
+            else:
+                torch.nn.utils.clip_grad_norm_(
+                    list(self.net.parameters()) + list(self.net_1.parameters()),
+                    max_norm=1.0
+                )
             
             # 更新參數
             if torch.cuda.is_available():
@@ -650,7 +742,11 @@ class PysicsInformedNeuralNetwork:
             
             while retry_count < max_retry_attempts:
                 try:
-                    self.opt.step()
+                    if use_amp:
+                        scaler.step(self.opt)
+                        scaler.update()
+                    else:
+                        self.opt.step()
                     break  # 成功執行，跳出重試循環
                     
                 except RuntimeError as e:
