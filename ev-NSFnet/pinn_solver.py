@@ -22,11 +22,15 @@ from torch.utils.data import TensorDataset, DataLoader, DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 import scipy.io
 import numpy as np
+import math
 from net import FCNet
 from typing import Dict, List, Set, Optional, Union, Callable
 import warnings
 import time
 import datetime
+from logger import LoggerFactory, PINNLogger
+from health_monitor import TrainingHealthMonitor, HealthThresholds
+from memory_manager import TrainingMemoryManager
 
 # 抑制 PyTorch 分散式訓練的 autograd 警告
 warnings.filterwarnings("ignore", message=".*c10d::allreduce_.*autograd kernel.*")
@@ -63,8 +67,17 @@ class PysicsInformedNeuralNetwork:
         self.world_size = int(os.environ.get('WORLD_SIZE', 1))
 
         # Set device for current process
-        self.device = torch.device(f'cuda:{self.local_rank}')
-        torch.cuda.set_device(self.local_rank)
+        if torch.cuda.is_available():
+            self.device = torch.device(f'cuda:{self.local_rank}')
+            try:
+                torch.cuda.set_device(self.local_rank)
+            except (RuntimeError, AttributeError):
+                # 處理CUDA設備設置失敗的情況
+                self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+                self.logger.warning(f"Failed to set CUDA device {self.local_rank}, using {self.device}")
+        else:
+            self.device = torch.device('cpu')
+            self.logger.warning("CUDA not available, using CPU")
 
         self.evm = None
         self.Re = Re
@@ -80,11 +93,18 @@ class PysicsInformedNeuralNetwork:
 
         self.checkpoint_freq = checkpoint_freq
 
+        # 日誌系統設定
+        self.logger = LoggerFactory.get_logger(
+            name=f"PINN_Re{Re}",
+            level="INFO",
+            rank=self.rank
+        )
+
         # TensorBoard設定
         if self.rank == 0:  # 只在主進程創建TensorBoard writer
             log_dir = f"runs/NSFnet_Re{Re}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
             self.tb_writer = SummaryWriter(log_dir=log_dir)
-            print(f"📊 TensorBoard log directory: {log_dir}")
+            self.logger.info(f"📊 TensorBoard log directory: {log_dir}")
         else:
             self.tb_writer = None
 
@@ -94,6 +114,30 @@ class PysicsInformedNeuralNetwork:
         self.stage_start_time = None
         self.training_start_time = None
         self.global_step_offset = 0  # 用於計算跨階段的global step
+
+        # 健康監控系統
+        if self.rank == 0:  # 只在主進程啟用健康監控
+            health_thresholds = HealthThresholds(
+                gpu_memory_warning=90.0,
+                process_memory_warning=12000.0,  # 12GB
+                cpu_warning=85.0
+            )
+            self.health_monitor = TrainingHealthMonitor(
+                logger=self.logger,
+                thresholds=health_thresholds,
+                check_interval=60.0  # 每分鐘檢查一次
+            )
+            
+            # 記憶體管理系統
+            self.memory_manager = TrainingMemoryManager(
+                logger=self.logger,
+                cpu_threshold=80.0,
+                gpu_threshold=85.0,
+                auto_cleanup_interval=300.0  # 5分鐘自動清理
+            )
+        else:
+            self.health_monitor = None
+            self.memory_manager = None
 
         self.alpha_evm = alpha_evm
         self.alpha_b = bc_weight
@@ -126,37 +170,25 @@ class PysicsInformedNeuralNetwork:
                              gradient_as_bucket_view=True)  # 提升記憶體效率
 
         if net_params:
-            if self.rank == 0:
-                print(f"Loading net params from {net_params}")
-            load_params = torch.load(net_params, map_location=self.device)
-            if hasattr(self.net, 'module'):
-                self.net.module.load_state_dict(load_params)
-            else:
-                self.net.load_state_dict(load_params)
+            self.logger.info(f"Loading net params from {net_params}")
+            self.load(net_params)
 
-        if net_params_1:
-            if self.rank == 0:
-                print(f"Loading net_1 params from {net_params_1}")
-            load_params_1 = torch.load(net_params_1, map_location=self.device)
-            if hasattr(self.net_1, 'module'):
-                self.net_1.module.load_state_dict(load_params_1)
-            else:
-                self.net_1.load_state_dict(load_params_1)
+        # 顯示分布式訓練信息
+        self.logger.info("Distributed training setup:")
+        self.logger.info(f"  World size: {self.world_size}")
+        self.logger.info(f"  Rank: {self.rank}")
+        self.logger.info(f"  Local rank: {self.local_rank}")
 
-        # 初始化 vis_t 相關變數
-        self.vis_t = None
-        self.vis_t_minus = None
-
-        self.opt = torch.optim.Adam(
-            list(self.get_model_parameters(self.net))+list(self.get_model_parameters(self.net_1)),
-            lr=learning_rate,
-            weight_decay=0.0) if not opt else opt
-
-        if self.rank == 0:
-            print(f"Distributed training setup:")
-            print(f"  World size: {self.world_size}")
-            print(f"  Rank: {self.rank}")
-            print(f"  Local rank: {self.local_rank}")
+        # 輸出初始化信息
+        config_info = {
+            "Reynolds數": self.Re,
+            "主網路": f"{self.layers} 層 × {self.hidden_size} 神經元",
+            "EVM網路": f"{self.layers_1} 層 × {self.hidden_size_1} 神經元",
+            "訓練點數": f"{self.N_f:,}",
+            "設備": str(self.device),
+            "批次大小": "全批次" if self.batch_size == self.N_f else str(self.batch_size)
+        }
+        self.logger.system_info(config_info)
 
     def get_model_parameters(self, model):
         """Get model parameters considering DDP wrapper"""
@@ -528,27 +560,41 @@ class PysicsInformedNeuralNetwork:
         # 使用完整數據進行訓練（不使用批次處理）
         actual_data_points = self.x_f.shape[0]
         
-        # 記錄階段開始時間
+        # 記錄階段開始時間和啟動健康監控
         if self.rank == 0:
             self.stage_start_time = time.time()
+            
+            # 設置訓練開始時間（只在第一次調用時）
             if self.training_start_time is None:
                 self.training_start_time = time.time()
+                
+            # 啟動健康監控
+            if self.health_monitor and not self.health_monitor.is_monitoring:
+                self.health_monitor.start_training_monitoring()
+                
+            # 啟動記憶體管理
+            if self.memory_manager:
+                self.memory_manager.optimize_for_training()
         
         if self.rank == 0:
-            print(f"=== Training Configuration (Full Batch) ===")
-            print(f"Stage: {self.current_stage}")
-            print(f"Total training points (N_f): {self.N_f}")
-            print(f"Actual GPU data points: {actual_data_points}")
-            print(f"Training mode: Full batch (no DataLoader)")
-            print(f"Total epochs: {num_epoch:,}")
-            print(f"DDP Mode: {'Enabled' if self.world_size > 1 else 'Disabled'}")
+            training_info = {
+                "階段": self.current_stage,
+                "訓練點總數": f"{self.N_f:,}",
+                "實際GPU數據點": f"{actual_data_points:,}",
+                "訓練模式": "全批次 (無DataLoader)",
+                "總epochs": f"{num_epoch:,}",
+                "DDP模式": "啟用" if self.world_size > 1 else "關閉"
+            }
+            self.logger.info("=== 訓練配置 (全批次) ===")
+            for key, value in training_info.items():
+                self.logger.info(f"{key}: {value}")
             
-            # 檢查GPU記憶體使用量
+            # GPU記憶體信息
             if torch.cuda.is_available():
                 memory_allocated = torch.cuda.memory_allocated(self.device) / 1024**3
                 memory_reserved = torch.cuda.memory_reserved(self.device) / 1024**3
-                print(f"GPU Memory - Allocated: {memory_allocated:.2f}GB, Reserved: {memory_reserved:.2f}GB")
-            print("=" * 50)
+                self.logger.info(f"GPU記憶體 - 已分配: {memory_allocated:.2f}GB, 已保留: {memory_reserved:.2f}GB")
+            self.logger.info("=" * 50)
         
         # 時間估算相關變數
         estimate_frequency = 100  # 每100個epoch計算一次預估時間
@@ -569,6 +615,11 @@ class PysicsInformedNeuralNetwork:
 
             # 直接使用完整數據計算損失（不使用批次處理）
             loss, losses = loss_func()
+            
+            # 損失值驗證和GPU記憶體檢查
+            if not self.validate_loss_and_memory(loss, losses, epoch_id):
+                self.logger.critical(f"Critical error at epoch {epoch_id}, stopping training...")
+                return
             
             # 梯度回傳
             loss.backward()
@@ -594,14 +645,50 @@ class PysicsInformedNeuralNetwork:
                 torch.cuda.synchronize()
             
             # 檢查DDP狀態並嘗試恢復
-            try:
-                self.opt.step()
-            except RuntimeError as e:
-                if "INTERNAL ASSERT FAILED" in str(e) or "unmarked_param_indices" in str(e):
-                    if self.rank == 0:
-                        print(f"Warning: DDP sync error at epoch {epoch_id}, attempting recovery...")
-                    continue
-                else:
+            max_retry_attempts = 3
+            retry_count = 0
+            
+            while retry_count < max_retry_attempts:
+                try:
+                    self.opt.step()
+                    break  # 成功執行，跳出重試循環
+                    
+                except RuntimeError as e:
+                    retry_count += 1
+                    error_msg = str(e)
+                    
+                    self.logger.ddp_error(error_msg, retry_count, max_retry_attempts)
+                    
+                    # 檢查特定的DDP錯誤類型
+                    if any(keyword in error_msg for keyword in [
+                        "INTERNAL ASSERT FAILED", 
+                        "unmarked_param_indices",
+                        "bucket_boundaries_",
+                        "DDP bucket",
+                        "find_unused_parameters"
+                    ]):
+                        if retry_count < max_retry_attempts:
+                            self.logger.info("   Attempting DDP recovery...")
+                            
+                            # 嘗試重建optimizer參數群組
+                            try:
+                                self.rebuild_optimizer_groups()
+                                # 清空梯度並重新同步
+                                self.opt.zero_grad()
+                                if torch.cuda.is_available():
+                                    torch.cuda.synchronize()
+                                    
+                            except Exception as recovery_e:
+                                self.logger.error(f"   DDP recovery failed: {recovery_e}")
+                        else:
+                            self.logger.error(f"DDP recovery failed after {max_retry_attempts} attempts, skipping step...")
+                            break
+                    else:
+                        # 非DDP相關錯誤，直接拋出
+                        raise e
+                        
+                except Exception as e:
+                    self.logger.error(f"Unexpected error during optimizer step: {e}")
                     raise e
             
             if scheduler:
@@ -611,42 +698,87 @@ class PysicsInformedNeuralNetwork:
             if self.rank == 0:
                 epoch_end_time = time.time()
                 epoch_time = epoch_end_time - self.epoch_start_time
+                
+                # 限制epoch_times大小以防記憶體洩漏
                 self.epoch_times.append(epoch_time)
+                if len(self.epoch_times) > 1000:  # 只保留最近1000個epoch的時間
+                    self.epoch_times = self.epoch_times[-500:]  # 刪除一半舊數據，保持高效
                 
                 # 記錄到TensorBoard
                 if self.tb_writer is not None:
                     global_step = self.global_step_offset + epoch_id
                     
-                    self.tb_writer.add_scalar('Loss/Total', epoch_loss, global_step)
-                    self.tb_writer.add_scalar('Loss/Equation', epoch_losses[0], global_step)
-                    self.tb_writer.add_scalar('Loss/Boundary', epoch_losses[1], global_step)
-                    self.tb_writer.add_scalar('Training/LearningRate', self.opt.param_groups[0]['lr'], global_step)
-                    self.tb_writer.add_scalar('Training/EpochTime', epoch_time, global_step)
-                    self.tb_writer.add_scalar('Training/Alpha_EVM', self.alpha_evm, global_step)
+                    self.safe_tensorboard_log('Loss/Total', epoch_loss, global_step)
+                    self.safe_tensorboard_log('Loss/Equation', epoch_losses[0], global_step)
+                    self.safe_tensorboard_log('Loss/Boundary', epoch_losses[1], global_step)
+                    self.safe_tensorboard_log('Training/LearningRate', self.opt.param_groups[0]['lr'], global_step)
+                    self.safe_tensorboard_log('Training/EpochTime', epoch_time, global_step)
+                    self.safe_tensorboard_log('Training/Alpha_EVM', self.alpha_evm, global_step)
                     
                     # GPU記憶體使用
                     if torch.cuda.is_available():
                         memory_allocated = torch.cuda.memory_allocated(self.device) / 1024**3
-                        self.tb_writer.add_scalar('System/GPU_Memory_GB', memory_allocated, global_step)
+                        self.safe_tensorboard_log('System/GPU_Memory_GB', memory_allocated, global_step)
+                
+                # 健康檢查 (每100個epoch檢查一次)
+                if self.health_monitor and epoch_id % 100 == 0:
+                    is_healthy = self.health_monitor.check_training_health(epoch_id, epoch_loss)
+                    if not is_healthy:
+                        self.logger.warning("⚕️ 系統健康檢查發現問題，考慮調整訓練參數")
+                        
+                        # 緊急情況下執行清理
+                        try:
+                            self.health_monitor.emergency_cleanup()
+                        except Exception as cleanup_error:
+                            self.logger.error(f"緊急清理失敗: {cleanup_error}")
+                
+                # 記憶體監控 (每50個epoch檢查一次)
+                if self.memory_manager and epoch_id % 50 == 0:
+                    memory_ok = self.memory_manager.monitor_training_memory(epoch_id, epoch_loss)
+                    if not memory_ok:
+                        self.logger.critical("💾 記憶體使用危險，建議調整訓練參數或重啟訓練")
+        
+        # 只在rank 0打印和保存（不需要平均，因為沒有步驟累積）
+        if self.rank == 0 and (epoch_id == 0 or (epoch_id + 1) % 100 == 0):
+            self.print_log_full_batch_with_time_estimate(epoch_loss, epoch_losses, epoch_id, num_epoch, actual_data_points)
+            
+            # 每1000個epoch輸出健康和記憶體報告
+            if epoch_id % 1000 == 0:
+                if self.health_monitor:
+                    self.health_monitor.log_health_report()
+                if self.memory_manager:
+                    self.memory_manager.log_memory_report()
+
+        if self.rank == 0 and (epoch_id == 0 or epoch_id % self.checkpoint_freq == 0):
+            saved_ckpt = 'model_cavity_loop%d.pth' % (epoch_id)
+            layers = self.layers
+            hidden_size = self.hidden_size
+            N_f = self.N_f
+            self.save(saved_ckpt, N_HLayer=layers, N_neu=hidden_size, N_f=N_f)
+            
+            # 更新檢查點時間
+            if self.health_monitor:
+                self.health_monitor.last_checkpoint_time = time.time()
         
         # 階段結束後更新global step offset
         if self.rank == 0:
             self.global_step_offset += num_epoch
-
-            # 只在rank 0打印和保存（不需要平均，因為沒有步驟累積）
-            if self.rank == 0 and (epoch_id == 0 or (epoch_id + 1) % 100 == 0):
-                self.print_log_full_batch_with_time_estimate(epoch_loss, epoch_losses, epoch_id, num_epoch, actual_data_points)
-
-            if self.rank == 0 and (epoch_id == 0 or epoch_id % self.checkpoint_freq == 0):
-                saved_ckpt = 'model_cavity_loop%d.pth' % (epoch_id)
-                layers = self.layers
-                hidden_size = self.hidden_size
-                N_f = self.N_f
-                self.save(saved_ckpt, N_HLayer=layers, N_neu=hidden_size, N_f=N_f)
-        
-        # 階段結束後更新global step offset
-        if self.rank == 0:
-            self.global_step_offset += num_epoch
+            
+            # 階段結束時的最終清理和統計
+            if self.memory_manager:
+                self.logger.info("🧹 訓練階段結束，執行最終記憶體清理...")
+                final_cleanup = self.memory_manager.cleanup_memory(force=True)
+                
+                # 記憶體洩漏檢測
+                leaks = self.memory_manager.detect_memory_leaks()
+                if leaks:
+                    self.logger.warning("🔍 檢測到記憶體洩漏，請檢查代碼")
+                
+                # 輸出訓練記憶體摘要
+                memory_summary = self.memory_manager.get_training_memory_summary()
+                self.logger.info(f"📊 訓練記憶體摘要: 峰值={memory_summary['peak_memory_mb']:.1f}MB, "
+                               f"清理次數={memory_summary['cleanup_count']}, "
+                               f"緩存命中率={memory_summary['cache_hit_rate']:.1f}%")
     
     def freeze_evm_net(self, epoch_id):
         """
@@ -699,6 +831,105 @@ class PysicsInformedNeuralNetwork:
         
         if self.rank == 0:
             print(f"  Active parameters: {len(all_params)} (net + net_1)")
+
+    def safe_tensorboard_log(self, tag, value, global_step):
+        """安全的TensorBoard記錄函數with錯誤處理"""
+        if self.tb_writer is not None:
+            try:
+                # 檢查值是否有效
+                if value is None or not isinstance(value, (int, float)):
+                    self.logger.warning(f"Invalid value for TensorBoard tag '{tag}': {value}")
+                    return
+                
+                # 檢查是否為NaN或Inf
+                if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                    self.logger.warning(f"NaN/Inf value detected for TensorBoard tag '{tag}': {value}")
+                    return
+                
+                # 記錄到TensorBoard
+                self.tb_writer.add_scalar(tag, value, global_step)
+                
+            except Exception as e:
+                self.logger.warning(f"TensorBoard logging error for tag '{tag}': {e}")
+
+    def validate_loss_and_memory(self, loss, losses, epoch_id):
+        """損失值驗證和GPU記憶體檢查"""
+        try:
+            # 檢查主損失值
+            loss_value = loss.detach().item() if hasattr(loss, 'detach') else loss
+            
+            if math.isnan(loss_value) or math.isinf(loss_value):
+                self.logger.loss_validation_error(epoch_id, loss_value, "main")
+                return False
+            
+            if loss_value > 1e10:  # 損失值過大
+                self.logger.warning(f"Extremely large loss detected at epoch {epoch_id}: {loss_value}")
+            
+            # 檢查各個損失組件
+            for i, component_loss in enumerate(losses):
+                comp_value = component_loss.detach().item() if hasattr(component_loss, 'detach') else component_loss
+                
+                if math.isnan(comp_value) or math.isinf(comp_value):
+                    self.logger.loss_validation_error(epoch_id, comp_value, f"component_{i}")
+                    return False
+            
+            # GPU記憶體檢查
+            if torch.cuda.is_available():
+                memory_allocated = torch.cuda.memory_allocated(self.device) / 1024**3
+                memory_reserved = torch.cuda.memory_reserved(self.device) / 1024**3
+                
+                # 檢查記憶體使用是否過高（超過可用記憶體的90%）
+                total_memory = torch.cuda.get_device_properties(self.device).total_memory / 1024**3
+                if memory_allocated > total_memory * 0.9:
+                    self.logger.memory_warning(memory_allocated, total_memory)
+                    self.logger.info("   Attempting memory cleanup...")
+                    
+                    # 嘗試清理GPU記憶體
+                    torch.cuda.empty_cache()
+                    
+                    # 再次檢查
+                    memory_allocated_after = torch.cuda.memory_allocated(self.device) / 1024**3
+                    if memory_allocated_after > total_memory * 0.95:
+                        self.logger.critical(f"Critical GPU memory usage: {memory_allocated_after:.2f}GB / {total_memory:.2f}GB")
+                        return False
+            
+            return True
+            
+        except Exception as e:
+            self.logger.warning(f"Error in loss/memory validation at epoch {epoch_id}: {e}")
+            return True  # 驗證錯誤時繼續訓練
+
+    def rebuild_optimizer_groups(self):
+        """重建optimizer參數群組以修復DDP問題"""
+        try:
+            # 獲取所有需要梯度的參數
+            all_params = []
+            for param in self.net.parameters():
+                if param.requires_grad:
+                    all_params.append(param)
+            for param in self.net_1.parameters():
+                if param.requires_grad:
+                    all_params.append(param)
+            
+            if len(all_params) > 0:
+                # 保存當前學習率和其他配置
+                current_lr = self.opt.param_groups[0]['lr']
+                current_config = {k: v for k, v in self.opt.param_groups[0].items() if k != 'params'}
+                
+                # 更新參數列表
+                self.opt.param_groups[0]['params'] = all_params
+                
+                # 恢復其他配置
+                for key, value in current_config.items():
+                    self.opt.param_groups[0][key] = value
+                    
+                if self.rank == 0:
+                    print(f"   Rebuilt optimizer with {len(all_params)} parameters")
+                    
+        except Exception as e:
+            if self.rank == 0:
+                print(f"   Failed to rebuild optimizer groups: {e}")
+            raise e
 
     def print_log_full_batch_with_time_estimate(self, loss, losses, epoch_id, num_epoch, data_points):
         """打印訓練日誌包含時間預估功能"""

@@ -1,0 +1,32 @@
+experiment_name: "NSFnet_Test"
+description: "快速測試配置 - 適用於開發和調試"
+
+network:
+  layers: 2
+  layers_1: 2
+  hidden_size: 20
+  hidden_size_1: 10
+
+training:
+  N_f: 1000
+  batch_size: null
+  checkpoint_freq: 50
+  training_stages:
+    - [0.05, 10, 0.001]    # Stage 1: 10 epochs
+    - [0.03, 10, 0.0005]   # Stage 2: 10 epochs
+
+physics:
+  Re: 3000
+  alpha_evm: 0.03
+  bc_weight: 20.0
+  eq_weight: 1.0
+
+system:
+  device: "auto"
+  precision: "float32"
+  tensorboard_enabled: true
+  log_level: "DEBUG"
+  memory_limit_gb: 2.0
+  gradient_clip_norm: 1.0
+  memory_cleanup_freq: 10
+  epoch_times_limit: 100

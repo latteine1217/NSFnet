@@ -1,0 +1,36 @@
+experiment_name: "NSFnet_Re5000_Production"
+description: "高精度Physics-Informed Neural Network for Re=5000 Lid-Driven Cavity Flow"
+
+network:
+  layers: 6
+  layers_1: 4
+  hidden_size: 80
+  hidden_size_1: 40
+
+training:
+  N_f: 120000
+  batch_size: null  # 全批次訓練
+  checkpoint_freq: 5000
+  training_stages:
+    - [0.05, 500000, 0.001]    # Stage 1: α=0.05, 500k epochs, lr=1e-3
+    - [0.04, 500000, 0.0005]   # Stage 2: α=0.04, 500k epochs, lr=5e-4
+    - [0.03, 500000, 0.0001]   # Stage 3: α=0.03, 500k epochs, lr=1e-4
+    - [0.02, 500000, 0.00005]  # Stage 4: α=0.02, 500k epochs, lr=5e-5
+    - [0.01, 500000, 0.00001]  # Stage 5: α=0.01, 500k epochs, lr=1e-5
+    - [0.005, 500000, 0.000005] # Stage 6: α=0.005, 500k epochs, lr=5e-6
+
+physics:
+  Re: 5000
+  alpha_evm: 0.03
+  bc_weight: 20.0
+  eq_weight: 1.0
+
+system:
+  device: "auto"
+  precision: "float32"
+  tensorboard_enabled: true
+  log_level: "INFO"
+  memory_limit_gb: 14.0
+  gradient_clip_norm: 1.0
+  memory_cleanup_freq: 100
+  epoch_times_limit: 1000
