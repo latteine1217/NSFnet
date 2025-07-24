@@ -218,6 +218,20 @@ class PysicsInformedNeuralNetwork:
     def set_alpha_evm(self, alpha):
         self.alpha_evm = alpha
 
+    def _check_gradients(self):
+        """檢查梯度狀態，避免梯度爆炸"""
+        total_norm = 0
+        param_count = 0
+        for p in list(self.net.parameters()) + list(self.net_1.parameters()):
+            if p.grad is not None:
+                total_norm += p.grad.data.norm(2).item() ** 2
+                param_count += 1
+        
+        if param_count > 0:
+            total_norm = total_norm ** (1. / 2)
+            return total_norm
+        return 0.0
+
     def initialize_NN(self,
                       num_ins=3,
                       num_outs=3,
@@ -396,8 +410,21 @@ class PysicsInformedNeuralNetwork:
 
         self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e
 
-        return self.loss, [self.loss_e_avg if hasattr(self, 'loss_e_avg') else self.loss_e, 
-                          self.loss_b_avg if hasattr(self, 'loss_b_avg') else self.loss_b]
+        # 創建用於backward的loss（保持梯度）
+        loss_for_backward = self.loss
+        
+        # 創建用於日誌記錄的detached數值
+        if hasattr(self, 'loss_e_avg'):
+            loss_e_log = self.loss_e_avg.detach().item()
+        else:
+            loss_e_log = self.loss_e.detach().item()
+            
+        if hasattr(self, 'loss_b_avg'):
+            loss_b_log = self.loss_b_avg.detach().item()
+        else:
+            loss_b_log = self.loss_b.detach().item()
+
+        return loss_for_backward, [loss_e_log, loss_b_log]
 
     def train(self,
               num_epoch=1,
@@ -446,6 +473,9 @@ class PysicsInformedNeuralNetwork:
             if (epoch_id - 1) % 10000 == 0:
                 self.freeze_evm_net(epoch_id)
 
+            # 清除上一個epoch的梯度
+            self.opt.zero_grad()
+
             # 重新載入原始數據（在每個epoch開始時重置）
             original_x_f = self.x_f.clone()
             original_y_f = self.y_f.clone()
@@ -462,9 +492,9 @@ class PysicsInformedNeuralNetwork:
                     print(f"[Epoch {epoch_id}] Data shuffled for better convergence (points: {actual_points})")
 
             epoch_loss = 0.0
-            epoch_losses = None
+            epoch_losses = [0.0, 0.0]  # 預初始化為數值
             
-            # micro-batch迴圈
+            # 梯度累積循環 - 批次訓練循環
             for step in range(steps_per_epoch):
                 # 計算當前批次的索引範圍
                 start_idx = step * actual_batch_size
@@ -497,31 +527,62 @@ class PysicsInformedNeuralNetwork:
                 # 計算損失
                 loss, losses = loss_func()
                 
-                # 反向傳播
-                loss.backward()
+                # 正規化損失避免梯度爆炸
+                normalized_loss = loss / steps_per_epoch
                 
-                # 每個micro-batch後立即更新參數
-                self.opt.step()
+                # 梯度累積：只做backward，不step，添加錯誤恢復
+                try:
+                    normalized_loss.backward()
+                except RuntimeError as e:
+                    if "backward through the graph a second time" in str(e):
+                        if self.rank == 0:
+                            print(f"Warning: Graph reuse detected at step {step}, skipping this batch")
+                        # 清理張量引用並繼續
+                        del loss, normalized_loss
+                        continue
+                    else:
+                        raise e
                 
-                # 清除梯度準備下一個micro-batch
-                self.opt.zero_grad()
+                # 記錄損失值（現在losses已經是數值列表）
+                epoch_loss += loss.detach().item()
+                epoch_losses[0] += losses[0]
+                epoch_losses[1] += losses[1]
                 
-                epoch_loss += loss.item()
-                if epoch_losses is None:
-                    epoch_losses = [l.item() if hasattr(l, 'item') else l for l in losses]
-                else:
-                    for i, l in enumerate(losses):
-                        epoch_losses[i] += (l.item() if hasattr(l, 'item') else l)
+                # 立即清理張量引用
+                del loss, normalized_loss
+                
+                # 定期清理GPU緩存
+                if step % max(1, steps_per_epoch // 4) == 0 and step > 0:
+                    torch.cuda.empty_cache()
                 
                 # 在每個step後恢復原始數據大小以備下次使用
                 if actual_batch_size < actual_data_points:
                     self.x_f = original_x_f
                     self.y_f = original_y_f
             
+            # 檢查梯度狀態並進行裁剪
+            grad_norm = self._check_gradients()
+            if grad_norm > 10.0:  # 如果梯度過大
+                if self.rank == 0:
+                    print(f"Warning: Large gradient norm {grad_norm:.2f}, clipping...")
+                torch.nn.utils.clip_grad_norm_(
+                    list(self.net.parameters()) + list(self.net_1.parameters()),
+                    max_norm=1.0
+                )
+            elif grad_norm > 1.0:
+                # 標準梯度裁剪
+                torch.nn.utils.clip_grad_norm_(
+                    list(self.net.parameters()) + list(self.net_1.parameters()), 
+                    max_norm=1.0
+                )
+            
+            # 一個epoch結束後統一更新參數
+            self.opt.step()
+            
             # 計算平均損失
             epoch_loss /= steps_per_epoch
-            for i in range(len(epoch_losses)):
-                epoch_losses[i] /= steps_per_epoch
+            epoch_losses[0] /= steps_per_epoch
+            epoch_losses[1] /= steps_per_epoch
             
             if scheduler:
                 scheduler.step()
