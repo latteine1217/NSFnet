@@ -31,11 +31,11 @@ class TrainingConfig:
             # 默認6階段訓練配置
             self.training_stages = [
                 (0.05, 500000, 1e-3),   # Stage 1
-                (0.04, 500000, 5e-4),   # Stage 2  
-                (0.03, 500000, 1e-4),   # Stage 3
-                (0.02, 500000, 5e-5),   # Stage 4
-                (0.01, 500000, 1e-5),   # Stage 5
-                (0.005, 500000, 5e-6)   # Stage 6
+                (0.03, 500000, 2e-4),   # Stage 2  
+                (0.01, 500000, 4e-5),   # Stage 3
+                (0.005, 500000, 1e-5),   # Stage 4
+                (0.002, 500000, 2e-6),   # Stage 5
+                (0.002, 500000, 2e-6)   # Stage 6
             ]
 
 @dataclass
@@ -43,7 +43,7 @@ class PhysicsConfig:
     """物理參數配置"""
     Re: int = 5000                     # Reynolds number
     alpha_evm: float = 0.03            # 初始EVM係數
-    bc_weight: float = 20.0            # 邊界條件權重
+    bc_weight: float = 10.0            # 邊界條件權重
     eq_weight: float = 1.0             # 方程權重
 
 @dataclass
