@@ -1282,7 +1282,25 @@ class PysicsInformedNeuralNetwork:
             p_pred = p_pred.reshape(257,257)
             e_pred = e_pred.reshape(257,257)
 
-            scipy.io.savemat('./NSFnet/ev-NSFnet/results/Re5000/test_result/cavity_result_loop_%d.mat'%(loop),
+            Re_folder = 'Re'+str(self.Re)
+            NNsize = str(self.layers) + 'x' + str(self.hidden_size) + '_Nf'+str(np.int32(self.N_f/1000)) + 'k'
+            lambdas = 'lamB'+str(self.alpha_b) + '_alpha'+str(self.alpha_evm) + str(self.current_stage)
+            
+            # 從config.py讀取基礎路徑
+            try:
+                from config import RESULTS_PATH
+                base_path = RESULTS_PATH
+            except ImportError:
+                base_path = 'results'
+
+            relative_path = os.path.join(base_path, Re_folder, f"{NNsize}_{lambdas}")
+
+            if not os.path.exists(relative_path):
+                os.makedirs(relative_path)
+
+            file_path = os.path.join(relative_path, 'cavity_result_loop_%d.mat'%(loop))
+
+            scipy.io.savemat(file_path,
                         {'U_pred':u_pred,
                          'V_pred':v_pred,
                          'P_pred':p_pred,
