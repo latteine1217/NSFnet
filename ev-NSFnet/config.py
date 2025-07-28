@@ -30,12 +30,12 @@ class TrainingConfig:
         if self.training_stages is None:
             # 默認6階段訓練配置
             self.training_stages = [
-                (0.05, 500000, 1e-3),   # Stage 1
-                (0.03, 500000, 2e-4),   # Stage 2  
-                (0.01, 500000, 4e-5),   # Stage 3
-                (0.005, 500000, 1e-5),   # Stage 4
-                (0.002, 500000, 2e-6),   # Stage 5
-                (0.002, 500000, 2e-6)   # Stage 6
+                (0.05, 350000, 1e-3),   # Stage 1
+                (0.03, 350000, 2e-4),   # Stage 2  
+                (0.01, 350000, 4e-5),   # Stage 3
+                (0.005, 350000, 1e-5),   # Stage 4
+                (0.002, 350000, 2e-6),   # Stage 5
+                (0.002, 350000, 2e-6)   # Stage 6
             ]
 
 @dataclass

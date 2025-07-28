@@ -169,11 +169,10 @@ def main():
             weight_decay=0.0
         )
 
-        """        # 執行分階段訓練
+        # 執行分階段訓練
         for stage_idx, (alpha_evm, num_epochs, learning_rate, stage_name) in enumerate(training_stages):
             if not is_distributed or PINN.rank == 0:
-                print(f"
-🔄 {stage_name}: alpha_evm={alpha_evm}, epochs={num_epochs:,}, lr={learning_rate:.2e}")
+                print(f"🔄 {stage_name}: alpha_evm={alpha_evm}, epochs={num_epochs:,}, lr={learning_rate:.2e}")
             
             # 設置階段名稱和參數
             PINN.current_stage = stage_name
@@ -278,4 +277,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-""
