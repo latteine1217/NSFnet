@@ -820,8 +820,8 @@ class PysicsInformedNeuralNetwork:
             # 記錄損失值
             epoch_loss = loss.detach().item()
             epoch_losses = [
-                losses[0] if isinstance(losses[0], (int, float)) else losses[0].detach().item(),
-                losses[1] if isinstance(losses[1], (int, float)) else losses[1].detach().item()
+                losses[i] if isinstance(losses[i], (int, float)) else losses[i].detach().item()
+                for i in range(len(losses))
             ]
             
             # 清理張量引用
