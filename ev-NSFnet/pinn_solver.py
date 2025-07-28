@@ -731,7 +731,7 @@ class PysicsInformedNeuralNetwork:
         else:
             loss_b_log = self.loss_b.detach().item()
 
-        return loss_for_backward, [loss_e_log, loss_b_log]
+        return loss_for_backward, [loss_e_log, loss_b_log, self.loss_eq1.detach().item(), self.loss_eq2.detach().item(), self.loss_eq3.detach().item(), self.loss_eq4.detach().item()]
 
     def train(self,
               num_epoch=1,
@@ -905,8 +905,12 @@ class PysicsInformedNeuralNetwork:
                     global_step = self.global_step_offset + epoch_id
                     
                     self.safe_tensorboard_log('Loss/Total', epoch_loss, global_step)
-                    self.safe_tensorboard_log('Loss/Equation', epoch_losses[0], global_step)
+                    self.safe_tensorboard_log('Loss/Equation_Combined', epoch_losses[0], global_step)
                     self.safe_tensorboard_log('Loss/Boundary', epoch_losses[1], global_step)
+                    self.safe_tensorboard_log('Loss/Equation_NS_X', epoch_losses[2], global_step)
+                    self.safe_tensorboard_log('Loss/Equation_NS_Y', epoch_losses[3], global_step)
+                    self.safe_tensorboard_log('Loss/Equation_Continuity', epoch_losses[4], global_step)
+                    self.safe_tensorboard_log('Loss/Equation_EntropyResidual', epoch_losses[5], global_step)
                     self.safe_tensorboard_log('Training/LearningRate', self.opt.param_groups[0]['lr'], global_step)
                     self.safe_tensorboard_log('Training/EpochTime', epoch_time, global_step)
                     self.safe_tensorboard_log('Training/Alpha_EVM', self.alpha_evm, global_step)
@@ -1186,7 +1190,11 @@ class PysicsInformedNeuralNetwork:
             # 損失信息
             print(f"\n📈 損失狀況:")
             print(f"   總損失:   {loss:.3e} {convergence_info['trend_symbol']}")
-            print(f"   方程損失: {losses[0]:.3e}")
+            print(f"   方程總損失: {losses[0]:.3e}")
+            print(f"   Navier-Stokes X損失: {losses[2]:.3e}")
+            print(f"   Navier-Stokes Y損失: {losses[3]:.3e}")
+            print(f"   連續性方程損失: {losses[4]:.3e}")
+            print(f"   熵殘差損失: {losses[5]:.3e}")
             print(f"   邊界損失: {losses[1]:.3e}")
             print(f"   收斂趨勢: {convergence_info['description']}")
             
@@ -1270,8 +1278,8 @@ class PysicsInformedNeuralNetwork:
     def print_log_full_batch(self, loss, losses, epoch_id, num_epoch, data_points):
         current_lr = self.opt.param_groups[0]['lr']
         print('current lr is {}'.format(current_lr))
-        print('epoch/num_epoch: {:6d} / {:d} data_points: {:d} avg_loss[Adam]: {:.3e} avg_eq1_loss: {:.3e}  avg_bc_loss: {:.3e}'.format(
-            epoch_id + 1, num_epoch, data_points, loss, losses[0], losses[1]))
+        print('epoch/num_epoch: {:6d} / {:d} data_points: {:d} avg_loss[Adam]: {:.3e} avg_eq_combined_loss: {:.3e} avg_eq1_loss: {:.3e} avg_eq2_loss: {:.3e} avg_eq3_loss: {:.3e} avg_eq4_loss: {:.3e} avg_bc_loss: {:.3e}'.format(
+            epoch_id + 1, num_epoch, data_points, loss, losses[0], losses[2], losses[3], losses[4], losses[5], losses[1]))
 
     def print_log_batch(self, loss, losses, epoch_id, num_epoch, batch_size, steps_per_epoch):
         def get_lr(optimizer):
@@ -1285,7 +1293,11 @@ class PysicsInformedNeuralNetwork:
               "steps/epoch:", steps_per_epoch,
               "coverage: {:.1f}%".format(coverage_percent),
               "avg_loss[Adam]: %.3e" %(loss),
-              "avg_eq1_loss: %.3e " %(losses[0] if len(losses) > 0 else 0),
+              "avg_eq_combined_loss: %.3e" %(losses[0] if len(losses) > 0 else 0),
+              "avg_eq1_loss: %.3e" %(losses[2] if len(losses) > 2 else 0),
+              "avg_eq2_loss: %.3e" %(losses[3] if len(losses) > 3 else 0),
+              "avg_eq3_loss: %.3e" %(losses[4] if len(losses) > 4 else 0),
+              "avg_eq4_loss: %.3e" %(losses[5] if len(losses) > 5 else 0),
               "avg_bc_loss: %.3e" %(losses[1] if len(losses) > 1 else 0))
 
     def print_log(self, loss, losses, epoch_id, num_epoch):
@@ -1294,19 +1306,15 @@ class PysicsInformedNeuralNetwork:
                 return param_group['lr']
 
         print("current lr is {}".format(get_lr(self.opt)))
-        if isinstance(losses[0], int):
-            eq_loss = losses[0]
-        else:
-            eq_loss = losses[0].detach().cpu().item()
-
         print("epoch/num_epoch: ", epoch_id + 1, "/", num_epoch,
               "loss[Adam]: %.3e"
               %(loss.detach().cpu().item()),
-              "eq1_loss: %.3e " %(self.loss_eq1.detach().cpu().item()),
-              "eq2_loss: %.3e " %(self.loss_eq2.detach().cpu().item()),
-              "eq3_loss: %.3e " %(self.loss_eq3.detach().cpu().item()),
-              "eq4_loss: %.3e " %(self.loss_eq4.detach().cpu().item()),
-              "bc_loss: %.3e" %(losses[1].detach().cpu().item()))
+              "eq_combined_loss: %.3e " %(losses[0]),
+              "eq1_loss: %.3e " %(losses[2]),
+              "eq2_loss: %.3e " %(losses[3]),
+              "eq3_loss: %.3e " %(losses[4]),
+              "eq4_loss: %.3e " %(losses[5]),
+              "bc_loss: %.3e" %(losses[1]))
 
     def evaluate(self, x, y, u, v, p):
         """ testing all points in the domain """
