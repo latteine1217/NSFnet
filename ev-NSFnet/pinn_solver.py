@@ -654,12 +654,13 @@ class PysicsInformedNeuralNetwork:
               lr=1e-4,
               optimizer=None,
               scheduler=None,
-              batchsize=None):
+              batchsize=None,
+              profiler=None):
         if self.opt is not None:
             self.opt.param_groups[0]['lr'] = lr
-        return self.solve_Adam(self.fwd_computing_loss_2d, num_epoch, batchsize, scheduler)
+        return self.solve_Adam(self.fwd_computing_loss_2d, num_epoch, batchsize, scheduler, profiler)
 
-    def solve_Adam(self, loss_func, num_epoch=1000, batchsize=None, scheduler=None):
+    def solve_Adam(self, loss_func, num_epoch=1000, batchsize=None, scheduler=None, profiler=None):
         # 啟用初始凍結
         self.freeze_evm_net(0)
         
@@ -800,6 +801,9 @@ class PysicsInformedNeuralNetwork:
             
             if scheduler:
                 scheduler.step()
+
+            if profiler:
+                profiler.step()
 
             # 時間追蹤和預估（只在rank 0執行）
             if self.rank == 0:

@@ -31,6 +31,7 @@
 
 ## Commands
 - **Train**: `python train.py` (main training script)
+- **Train with LR Scheduler**: `python train.py --lr-scheduler [StepLR|MultiStage|CosineAnnealing|Constant]`
 - **Test**: `python test.py` (evaluation script)
 - **P100 Compatibility Test**: `python test_p100_compatibility.py` (hardware compatibility check)
 - **Single test**: No specific command - modify test.py loop ranges
