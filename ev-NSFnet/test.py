@@ -20,10 +20,18 @@ from tools import *
 import cavity_data as cavity
 import pinn_solver as psolver
 import csv
+import os
+import argparse
+import re
 
+def parse_args():
+    parser = argparse.ArgumentParser(description='PINN Testing Script')
+    parser.add_argument('--run_dir', type=str, required=True,
+                        help='Path to the run directory containing checkpoints (e.g., ~/NSFnet/ev-NSFnet/results/Re5000/6x80_Nf120k_lamB10_alpha0.05Stage_1)')
+    return parser.parse_args()
 
-def train(net_params=None, net_params_1=None, loop = 0, loss_record=None):
-    Re = 5000   # Reynolds number
+def test_run(run_dir):
+    Re = 5000   # Reynolds number (This should ideally be read from checkpoint or config)
     N_neu = 80
     N_neu_1 = 40
     lam_bcs = 10
@@ -32,8 +40,8 @@ def train(net_params=None, net_params_1=None, loop = 0, loss_record=None):
     alpha_evm = 0.03
     N_HLayer = 6
     N_HLayer_1 = 4
-  #  layers = [2] + N_HLayer*[N_neu] + [4]
 
+    # Initialize PINN model (weights will be loaded from checkpoint)
     PINN = psolver.PysicsInformedNeuralNetwork(
         Re=Re,
         layers=N_HLayer,
@@ -43,17 +51,44 @@ def train(net_params=None, net_params_1=None, loop = 0, loss_record=None):
         alpha_evm=alpha_evm,
         bc_weight=lam_bcs,
         eq_weight=lam_equ,
-        net_params=net_params,
-        net_params_1=net_params_1)
+        # net_params and net_params_1 are not needed here as we load full checkpoint
+    )
+    
+    # Dummy optimizer for loading checkpoint (state will be overwritten)
+    optimizer = torch.optim.Adam(
+        list(PINN.get_model_parameters(PINN.net)) + list(PINN.get_model_parameters(PINN.net_1)),
+        lr=0.001, # Dummy learning rate
+        weight_decay=0.0
+    )
+    PINN.set_optimizers(optimizer)
+
     path = './data/'
     dataloader = cavity.DataLoader(path=path, N_f=N_f, N_b=1000)
 
-    filename = './data/cavity_Re'+str(Re)+'_256_Uniform.mat'
+    filename = f'./data/cavity_Re{Re}_256_Uniform.mat'
     x_star, y_star, u_star, v_star, p_star = dataloader.loading_evaluate_data(filename)
 
-    # Evaluating
-    PINN.evaluate(x_star, y_star, u_star, v_star, p_star)
-    PINN.test(x_star, y_star, u_star, v_star, p_star,  loop)
+    # Find all checkpoint files in the run_dir
+    checkpoint_files = sorted([f for f in os.listdir(run_dir) if re.match(r'checkpoint_epoch_\d+\.pth', f)])
+
+    if not checkpoint_files:
+        print(f"No checkpoint files found in {run_dir}")
+        return
+
+    for checkpoint_file in checkpoint_files:
+        checkpoint_path = os.path.join(run_dir, checkpoint_file)
+        print(f"Evaluating checkpoint: {checkpoint_path}")
+        
+        # Load the checkpoint
+        start_epoch = PINN.load_checkpoint(checkpoint_path, optimizer)
+        
+        # Extract epoch from filename for loop parameter
+        match = re.search(r'epoch_(\d+)\.pth', checkpoint_file)
+        current_epoch = int(match.group(1)) if match else 0
+
+        # Evaluating
+        PINN.evaluate(x_star, y_star, u_star, v_star, p_star)
+        PINN.test(x_star, y_star, u_star, v_star, p_star, current_epoch)
 
 if __name__ == "__main__":
     is_distributed = setup_distributed()
@@ -62,34 +97,9 @@ if __name__ == "__main__":
         os.environ['RANK'] = '0'
         os.environ['LOCAL_RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
-    for eid in range(0, 500000, 10000):
-       net_params = './results/Re5000/6x80_Nf120k_lamB10_alpha0.05Stage 1/model_cavity_loop%d.pth'%(eid)
-       net_params_1 = './results/Re5000/6x80_Nf120k_lamB10_alpha0.05Stage 1/model_cavity_loop%d.pth_evm'%(eid)
-       train(net_params=net_params, net_params_1 = net_params_1, loop = eid)
+    
+    args = parse_args()
+    test_run(args.run_dir)
 
-    for eid in range(0, 500000, 10000):
-       net_params = './results/Re5000/6x80_Nf120k_lamB10_alpha0.03Stage 2/model_cavity_loop%d.pth'%(eid)
-       net_params_1 = './results/Re5000/6x80_Nf120k_lamB10_alpha0.03Stage 2/model_cavity_loop%d.pth_evm'%(eid)
-       train(net_params=net_params, net_params_1 = net_params_1, loop = eid+500000)
-       
-    for eid in range(0, 500000, 10000):
-       net_params = './results/Re5000/6x80_Nf120k_lamB10_alpha0.01Stage 3/model_cavity_loop%d.pth'%(eid)
-       net_params_1 = './results/Re5000/6x80_Nf120k_lamB10_alpha0.01Stage 3/model_cavity_loop%d.pth_evm'%(eid)
-       train(net_params=net_params, net_params_1 = net_params_1, loop = eid+1000000)
-
-    for eid in range(0, 500000, 10000):
-       net_params = './results/Re5000/6x80_Nf120k_lamB10_alpha0.005Stage 4/model_cavity_loop%d.pth'%(eid)
-       net_params_1 = './results/Re5000/6x80_Nf120k_lamB10_alpha0.005Stage 4/model_cavity_loop%d.pth_evm'%(eid)
-       train(net_params=net_params, net_params_1 = net_params_1, loop = eid+1500000)
-
-    for eid in range(0, 500000, 10000):
-       net_params = './results/Re5000/6x80_Nf120k_lamB10_alpha0.002Stage 5/model_cavity_loop%d.pth'%(eid)
-       net_params_1 = './results/Re5000/6x80_Nf120k_lamB10_alpha0.002Stage 5/model_cavity_loop%d.pth_evm'%(eid)
-       train(net_params=net_params, net_params_1 = net_params_1, loop = eid+2000000)
-
-    for eid in range(0, 500000, 10000):
-       net_params = './results/Re5000/6x80_Nf120k_lamB10_alpha0.002Stage 6/model_cavity_loop%d.pth'%(eid)
-       net_params_1 = './results/Re5000/6x80_Nf120k_lamB10_alpha0.002Stage 6/model_cavity_loop%d.pth_evm'%(eid)
-       train(net_params=net_params, net_params_1 = net_params_1, loop = eid+2500000)
     if is_distributed:
         cleanup_distributed()

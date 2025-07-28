@@ -54,14 +54,26 @@ cd ev-NSFnet
 sbatch train.sh
 
 # 或直接執行Python訓練
-python train.py
+python train.py [OPTIONS]
+
+# 從檢查點恢復訓練
+# --resume <CHECKPOINT_PATH>: (可選) 指定要恢復訓練的檢查點檔案路徑。
+#                             例如: ~/NSFnet/ev-NSFnet/results/Re5000/6x80_Nf120k_lamB10_alpha0.05Stage_1/checkpoint_epoch_10000.pth
+python train.py --resume <CHECKPOINT_PATH>
+
+# 使用不同的學習率調度策略
+# --lr-scheduler <STRATEGY>: (可選) 選擇學習率調度策略。預設為 'StepLR'。
+#                            可選值: StepLR, MultiStage, CosineAnnealing, Constant
+python train.py --lr-scheduler CosineAnnealing
 ```
 
 ### 測試模型
 
 ```bash
-# 執行測試
-python test.py
+# 執行測試，並指定包含檢查點的訓練結果目錄
+# --run_dir <RUN_DIRECTORY>: (必填) 指定包含訓練檢查點的目錄路徑。
+#                            例如: ~/NSFnet/ev-NSFnet/results/Re5000/6x80_Nf120k_lamB10_alpha0.05Stage_1
+python test.py --run_dir <RUN_DIRECTORY>
 ```
 
 ## ⚙️ 訓練配置
@@ -163,7 +175,7 @@ ev-NSFnet/
 ├── data/                     # 訓練數據
 │   ├── cavity_Re3000_256_Uniform.mat
 │   └── cavity_Re5000_256_Uniform.mat
-├── results/                  # 訓練結果
+├── results/                  # 訓練結果 (包含各次訓練的檢查點與評估結果)
 ├── pinn_solver.py           # 核心求解器
 ├── net.py                   # 神經網路定義
 ├── train.py                 # 訓練腳本
@@ -181,9 +193,10 @@ ev-NSFnet/
 - **效率**: 支援多GPU加速
 
 ### 檢查點保存
-- 每2000個epoch自動保存模型
-- 模型文件格式: `model_cavity_loop{epoch}.pth`
-- 包含主網路和EVM網路權重
+- 每10000個epoch自動保存模型
+- 模型文件格式: `checkpoint_epoch_{epoch}.pth`
+- 包含主網路、EVM網路權重、優化器狀態及訓練進度
+- 儲存路徑: `~/NSFnet/ev-NSFnet/results/Re{Re}/{layers}x{hidden_size}_Nf{N_f/1000}k_lamB{bc_weight}_alpha{alpha_evm}{Stage_Name}/`
 
 ## 🛠️ 命令參考
 

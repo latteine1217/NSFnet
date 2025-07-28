@@ -163,16 +163,43 @@ def main():
             print("=" * 60)
 
         # 創建optimizer
-        PINN.opt = torch.optim.Adam(
+        optimizer = torch.optim.Adam(
             list(PINN.get_model_parameters(PINN.net)) + list(PINN.get_model_parameters(PINN.net_1)),
             lr=training_stages[0][2],  # 使用第一階段的學習率
             weight_decay=0.0
         )
+        PINN.set_optimizers(optimizer)
+
+        # 恢復訓練狀態
+        start_epoch = 0
+        if args.resume:
+            if rank == 0:
+                print(f"🔄 正在從檢查點恢復: {args.resume}")
+            start_epoch = PINN.load_checkpoint(args.resume, optimizer)
+            if rank == 0:
+                if start_epoch > 0:
+                    print(f"✅ 成功恢復，將從 epoch {start_epoch} 開始")
+                else:
+                    print("⚠️ 無法載入檢查點，將從頭開始訓練")
 
         # 執行分階段訓練
+        # Note: When resuming, training will continue from the next epoch in the sequence,
+        # but will start with the stage configuration determined by the current logic.
+        # This means if you resume in what was originally stage 2, it will still follow the
+        # sequence from stage 1 as defined in the config.
+        # A more advanced implementation might save and restore the stage index.
         for stage_idx, (alpha_evm, num_epochs, learning_rate, stage_name) in enumerate(training_stages):
+            # Skip epochs that are already completed if resuming
+            if start_epoch >= num_epochs:
+                if rank == 0:
+                    print(f"⏭️ 跳過 {stage_name} (已完成 {num_epochs} epochs，從 {start_epoch} 恢復)")
+                start_epoch -= num_epochs  # Decrement for next stage
+                continue
+            
+            epochs_to_run = num_epochs - start_epoch
+
             if not is_distributed or PINN.rank == 0:
-                print(f"🔄 {stage_name}: alpha_evm={alpha_evm}, epochs={num_epochs:,}, lr={learning_rate:.2e}")
+                print(f"🔄 {stage_name}: alpha_evm={alpha_evm}, epochs={epochs_to_run}/{num_epochs}, lr={learning_rate:.2e}")
             
             # 設置階段名稱和參數
             PINN.current_stage = stage_name
@@ -250,7 +277,7 @@ def main():
                 with_stack=True,
                 profile_memory=True
             ) as prof:
-                PINN.train(num_epoch=num_epochs, lr=learning_rate, scheduler=stage_scheduler, profiler=prof)
+                PINN.train(num_epoch=epochs_to_run, lr=learning_rate, scheduler=stage_scheduler, profiler=prof, start_epoch=start_epoch)
 
             stage_time = time.time() - start_time
             

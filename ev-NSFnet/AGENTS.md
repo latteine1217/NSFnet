@@ -31,8 +31,9 @@
 
 ## Commands
 - **Train**: `python train.py`
+- **Resume Training**: `python train.py --resume [CHECKPOINT_PATH]`
 - **Train with LR Scheduler**: `python train.py --lr-scheduler [StepLR|MultiStage|CosineAnnealing|Constant]`
-- **Test**: `python test.py`
+- **Test**: `python test.py --run_dir [RUN_DIRECTORY]`
 - **P100 Compatibility Test**: `python test_p100_compatibility.py` (hardware compatibility check)
 - **Single test**: No specific command - modify test.py loop ranges
 - **Dependencies**: PyTorch, NumPy, SciPy, Matplotlib (no package manager config found)

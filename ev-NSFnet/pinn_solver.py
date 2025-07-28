@@ -253,10 +253,94 @@ class PysicsInformedNeuralNetwork:
             return model.module
         else:
             return model
-            print(f"  Device: {self.device}")
-            print(f"  DDP find_unused_parameters: True (enabled for dynamic network freezing)")
 
-    def init_vis_t(self):
+    def get_checkpoint_dir(self):
+        """Generates the directory path for saving checkpoints and results."""
+        Re_folder = f'Re{self.Re}'
+        # Ensure integer conversion for folder names
+        n_f_k = int(self.N_f / 1000)
+        
+        # Format stage name for path
+        stage_name = self.current_stage.replace(' ', '_')
+
+        nn_size = f'{self.layers}x{self.hidden_size}_Nf{n_f_k}k'
+        params = f'lamB{int(self.alpha_b)}_alpha{self.alpha_evm}{stage_name}'
+        
+        # Use os.path.join for robust path construction
+        base_path = os.path.expanduser('~/NSFnet/ev-NSFnet/results')
+        return os.path.join(base_path, Re_folder, f"{nn_size}_{params}")
+
+    def save_checkpoint(self, epoch, optimizer):
+        """Saves a comprehensive checkpoint."""
+        if self.rank != 0:
+            return
+
+        checkpoint_dir = self.get_checkpoint_dir()
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch}.pth')
+        
+        # Ensure we are saving the underlying model state
+        net_state = self.get_model(self.net).state_dict()
+        net_1_state = self.get_model(self.net_1).state_dict()
+
+        checkpoint = {
+            'epoch': epoch,
+            'net_state_dict': net_state,
+            'net_1_state_dict': net_1_state,
+            'optimizer_state_dict': optimizer.state_dict(),
+            'Re': self.Re,
+            'alpha_evm': self.alpha_evm,
+            'current_stage': self.current_stage,
+            'global_step_offset': self.global_step_offset
+        }
+
+        try:
+            torch.save(checkpoint, checkpoint_path)
+            self.logger.checkpoint_saved(checkpoint_path, epoch)
+        except Exception as e:
+            self.logger.error(f"Failed to save checkpoint to {checkpoint_path}: {e}")
+
+    def load_checkpoint(self, checkpoint_path, optimizer):
+        """Loads a checkpoint to resume training."""
+        if not os.path.exists(checkpoint_path):
+            self.logger.error(f"Checkpoint file not found: {checkpoint_path}")
+            return 0 # Return 0 to indicate training should start from epoch 0
+
+        try:
+            # Load checkpoint to the same device as the model
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+            # Load model weights
+            self.get_model(self.net).load_state_dict(checkpoint['net_state_dict'])
+            self.get_model(self.net_1).load_state_dict(checkpoint['net_1_state_dict'])
+
+            # Load optimizer state
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+            # Load training state
+            start_epoch = checkpoint['epoch'] + 1
+            self.global_step_offset = checkpoint.get('global_step_offset', 0)
+            
+            # Restore key parameters to ensure consistency
+            self.Re = checkpoint.get('Re', self.Re)
+            self.alpha_evm = checkpoint.get('alpha_evm', self.alpha_evm)
+            
+            self.logger.info(f"✅ Resumed training from checkpoint: {checkpoint_path} at epoch {start_epoch}")
+            
+            # Move optimizer states to the correct device
+            for state in optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(self.device)
+
+            return start_epoch
+
+        except Exception as e:
+            self.logger.error(f"Failed to load checkpoint from {checkpoint_path}: {e}")
+            return 0 # Start from scratch if loading fails
+            
+            def init_vis_t(self):
         """優化版本：避免不必要的CPU轉換"""
         (_,_,_,e) = self.neural_net_u(self.x_f, self.y_f)
         self.vis_t_minus_gpu = self.alpha_evm*torch.abs(e).detach()  # 保持在GPU上
@@ -655,7 +739,8 @@ class PysicsInformedNeuralNetwork:
               optimizer=None,
               scheduler=None,
               batchsize=None,
-              profiler=None):
+              profiler=None,
+              start_epoch=0):
         if self.opt is not None:
             self.opt.param_groups[0]['lr'] = lr
         return self.solve_Adam(self.fwd_computing_loss_2d, num_epoch, batchsize, scheduler, profiler)
@@ -707,7 +792,7 @@ class PysicsInformedNeuralNetwork:
         # 時間估算相關變數
         estimate_frequency = 100  # 每100個epoch計算一次預估時間
         
-        for epoch_id in range(num_epoch):
+        for epoch_id in range(start_epoch, num_epoch):
             # 記錄epoch開始時間
             if self.rank == 0:
                 self.epoch_start_time = time.time()
@@ -860,16 +945,12 @@ class PysicsInformedNeuralNetwork:
                     if self.memory_manager:
                         self.memory_manager.log_memory_report()
 
-            if self.rank == 0 and (epoch_id == 0 or epoch_id % self.checkpoint_freq == 0):
-                saved_ckpt = 'model_cavity_loop%d.pth' % (epoch_id)
-                layers = self.layers
-                hidden_size = self.hidden_size
-                N_f = self.N_f
-                self.save(saved_ckpt, N_HLayer=layers, N_neu=hidden_size, N_f=N_f)
-                
-                # 更新檢查點時間
+            # Save checkpoint
+            if self.rank == 0 and (epoch_id > 0 and epoch_id % self.checkpoint_freq == 0 or epoch_id == num_epoch - 1):
+                self.save_checkpoint(epoch_id, self.opt)
                 if self.health_monitor:
-                    self.health_monitor.last_checkpoint_time = time.time()        
+                    self.health_monitor.last_checkpoint_time = time.time()
+
         # 階段結束後更新global step offset
         if self.rank == 0:
             self.global_step_offset += num_epoch
