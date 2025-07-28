@@ -242,7 +242,7 @@ def main():
 
                 # 第一階段：包含 Warmup + Cosine Annealing
                 if stage_idx == 0:
-                    warmup_epochs = 10000
+                    warmup_epochs = 8000
                     if num_epochs <= warmup_epochs:
                         # 如果階段太短，只進行 warm-up
                         if not is_distributed or PINN.rank == 0:
