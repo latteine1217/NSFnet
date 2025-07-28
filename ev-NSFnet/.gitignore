@@ -66,6 +66,8 @@ output/
 *.mat
 *.csv
 *.log
+*.out
+*.err
 
 # SLURM
 slurm-*.out
