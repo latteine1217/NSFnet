@@ -340,7 +340,7 @@ class PysicsInformedNeuralNetwork:
             self.logger.error(f"Failed to load checkpoint from {checkpoint_path}: {e}")
             return 0 # Start from scratch if loading fails
             
-            def init_vis_t(self):
+    def init_vis_t(self):
         """優化版本：避免不必要的CPU轉換"""
         (_,_,_,e) = self.neural_net_u(self.x_f, self.y_f)
         self.vis_t_minus_gpu = self.alpha_evm*torch.abs(e).detach()  # 保持在GPU上
