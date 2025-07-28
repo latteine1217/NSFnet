@@ -240,27 +240,9 @@ def main():
                     # 最後一個階段的終點學習率固定為 2e-6
                     eta_min = 2e-6
 
-                # 第一階段：包含 Warmup + Cosine Annealing
-                if stage_idx == 0:
-                    warmup_epochs = 8000
-                    if num_epochs <= warmup_epochs:
-                        # 如果階段太短，只進行 warm-up
-                        if not is_distributed or PINN.rank == 0:
-                            print(f"     - 階段 1: 僅執行 {num_epochs} epochs 的線性 Warmup")
-                        stage_scheduler = torch.optim.lr_scheduler.LinearLR(PINN.opt, start_factor=1e-4, total_iters=num_epochs)
-                    else:
-                        # 正常情況：Warmup + Annealing
-                        if not is_distributed or PINN.rank == 0:
-                            print(f"     - 階段 1: {warmup_epochs} epochs Warmup + {num_epochs - warmup_epochs} epochs CosineAnnealing (end LR: {eta_min:.2e})")
-                        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(PINN.opt, start_factor=1e-4, total_iters=warmup_epochs)
-                        annealing_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(PINN.opt, T_max=num_epochs - warmup_epochs, eta_min=eta_min)
-                        stage_scheduler = torch.optim.lr_scheduler.ChainedScheduler([warmup_scheduler, annealing_scheduler])
-                
-                # 其他階段：僅執行 Cosine Annealing
-                else:
-                    if not is_distributed or PINN.rank == 0:
-                        print(f"     - {stage_name}: {num_epochs} epochs CosineAnnealing (end LR: {eta_min:.2e})")
-                    stage_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(PINN.opt, T_max=num_epochs, eta_min=eta_min)
+                if not is_distributed or PINN.rank == 0:
+                    print(f"     - {stage_name}: {num_epochs} epochs CosineAnnealing (end LR: {eta_min:.2e})")
+                stage_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(PINN.opt, T_max=num_epochs, eta_min=eta_min)
 
             # 訓練當前階段
             start_time = time.time()
