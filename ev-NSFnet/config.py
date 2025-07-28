@@ -108,11 +108,20 @@ class ConfigManager:
     
     def load_from_dict(self, config_dict: Dict[str, Any]):
         """從字典載入配置"""
-        # 將list轉換回tuple (用於training_stages)
+        # 將list轉換回tuple (用於training_stages) 並確保學習率為浮點數
         if 'training' in config_dict and 'training_stages' in config_dict['training']:
-            config_dict['training']['training_stages'] = [
-                tuple(stage) for stage in config_dict['training']['training_stages']
-            ]
+            processed_stages = []
+            for stage in config_dict['training']['training_stages']:
+                if len(stage) == 3:
+                    # 確保學習率是浮點數
+                    try:
+                        lr = float(stage[2])
+                    except ValueError:
+                        raise ValueError(f"Invalid learning rate '{stage[2]}' in training_stages. Must be a float.")
+                    processed_stages.append((stage[0], stage[1], lr))
+                else:
+                    processed_stages.append(tuple(stage)) # 保持原有行為，如果階段不是3個元素
+            config_dict['training']['training_stages'] = processed_stages
         
         # 更新各個子配置
         if 'network' in config_dict:
