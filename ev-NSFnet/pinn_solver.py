@@ -743,7 +743,7 @@ class PysicsInformedNeuralNetwork:
               start_epoch=0):
         if self.opt is not None:
             self.opt.param_groups[0]['lr'] = lr
-        return self.solve_Adam(self.fwd_computing_loss_2d, num_epoch, batchsize, scheduler, profiler)
+        return self.solve_Adam(self.fwd_computing_loss_2d, num_epoch, batchsize, scheduler, profiler, start_epoch)
 
     def solve_Adam(self, loss_func, num_epoch=1000, batchsize=None, scheduler=None, profiler=None):
         # 啟用初始凍結
