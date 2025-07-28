@@ -30,8 +30,9 @@
 - residual最終會用以計算artificial viscosity帶回navier-stoke中作為人工粘滯度修正項
 
 ## Commands
-- **Train**: `python train.py` (main training script)
-- **Test**: `python test.py` (evaluation script)
+- **Train**: `python train.py`
+- **Train with LR Scheduler**: `python train.py --lr-scheduler [StepLR|MultiStage|CosineAnnealing|Constant]`
+- **Test**: `python test.py`
 - **P100 Compatibility Test**: `python test_p100_compatibility.py` (hardware compatibility check)
 - **Single test**: No specific command - modify test.py loop ranges
 - **Dependencies**: PyTorch, NumPy, SciPy, Matplotlib (no package manager config found)
