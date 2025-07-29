@@ -112,6 +112,9 @@ def main():
         # Dry run檢查（所有進程都需要退出）
         if args.dry_run:
             return
+
+        # Enable anomaly detection to find the operation that failed to compute its gradient
+        torch.autograd.set_detect_anomaly(True)
         
         # 只在主進程顯示PINN創建信息
         if rank == 0:
