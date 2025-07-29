@@ -558,7 +558,7 @@ class PysicsInformedNeuralNetwork:
                     repeat_times = (batch_size + self.vis_t_minus_gpu.shape[0] - 1) // self.vis_t_minus_gpu.shape[0]
                     vis_t_minus_batch = self.vis_t_minus_gpu.repeat(repeat_times, 1)[:batch_size]
             else:
-                vis_t_minus_batch = self.vis_t_minus_gpu
+                vis_t_minus_batch = self.vis_t_minus_gpu.clone()
             
             # 在GPU上計算minimum
             vis_t0_tensor = torch.full_like(vis_t_minus_batch, self.vis_t0)
