@@ -31,7 +31,6 @@ import datetime
 from logger import LoggerFactory, PINNLogger
 from health_monitor import TrainingHealthMonitor, HealthThresholds
 from memory_manager import TrainingMemoryManager
-from tsa_activation import TSA, tsa_regularization_loss
 
 
 
@@ -426,7 +425,7 @@ class PysicsInformedNeuralNetwork:
                      num_outs=num_outs,
                      num_layers=num_layers,
                      hidden_size=hidden_size,
-                     activation=TSA)
+                     activation=torch.nn.Tanh)
 
     def set_eq_training_func(self, train_data_func):
         self.train_data_func = train_data_func
@@ -667,10 +666,6 @@ class PysicsInformedNeuralNetwork:
 
         # 計算總損失（保持梯度追踪），確保兩個網路都參與
         self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e
-        
-        # 添加TSA正則化損失
-        reg_loss = tsa_regularization_loss(self.net) + tsa_regularization_loss(self.net_1)
-        self.loss += reg_loss
 
         # 添加一個小的正則化項確保兩個網路都參與梯度計算
         # 這不會影響訓練結果，但確保DDP工作正常
