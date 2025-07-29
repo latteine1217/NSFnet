@@ -16,7 +16,7 @@
 # Created: 08.03.2023
 import torch
 from collections import OrderedDict
-
+from tsa_activation import TSA
 
 # neural network
 class FCNet(torch.nn.Module):
@@ -39,7 +39,11 @@ class FCNet(torch.nn.Module):
             layer_list.append(
                 ('layer_%d' % i, torch.nn.Linear(layers[i], layers[i + 1]))
             )
-            layer_list.append(('activation_%d' % i, self.activation()))
+            # 檢查激活函數是否為TSA，如果是，則傳入神經元數量
+            if self.activation.__name__ == 'TSA':
+                layer_list.append(('activation_%d' % i, self.activation(hidden_size)))
+            else:
+                layer_list.append(('activation_%d' % i, self.activation()))
 
         layer_list.append(
             ('layer_%d' % (self.depth - 1), torch.nn.Linear(layers[-2], layers[-1]))

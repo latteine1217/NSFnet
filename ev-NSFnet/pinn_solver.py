@@ -31,24 +31,9 @@ import datetime
 from logger import LoggerFactory, PINNLogger
 from health_monitor import TrainingHealthMonitor, HealthThresholds
 from memory_manager import TrainingMemoryManager
+from tsa_activation import TSA, tsa_regularization_loss
 
-# 針對舊GPU (CUDA capability < 7.0) 的torch.compile相容性設置
-if torch.cuda.is_available():
-    device_capability = torch.cuda.get_device_capability(0)  # 檢查主GPU
-    major, minor = device_capability
-    cuda_capability = major + minor * 0.1
-    
-    if cuda_capability < 7.0:
-        # 設置環境變數以避免Triton編譯器錯誤
-        os.environ.setdefault('TORCH_COMPILE_BACKEND', 'eager')
-        os.environ.setdefault('TORCHDYNAMO_DISABLE', '1')
-        
-        # 抑制torch.compile相關錯誤
-        try:
-            import torch._dynamo
-            torch._dynamo.config.suppress_errors = True
-        except ImportError:
-            pass
+
 
 # 抑制 PyTorch 分散式訓練的 autograd 警告
 warnings.filterwarnings("ignore", message=".*c10d::allreduce_.*autograd kernel.*")
@@ -171,30 +156,7 @@ class PysicsInformedNeuralNetwork:
         self.net_1 = self.initialize_NN(
                 num_ins=num_ins, num_outs=num_outs_1, num_layers=layers_1, hidden_size=hidden_size_1).to(self.device)
 
-        # 優化：使用torch.compile加速網路推理 (僅支援CUDA capability >= 7.0)
-        if hasattr(torch, 'compile') and torch.__version__ >= "2.0":
-            try:
-                # 檢查CUDA capability是否支援Triton編譯器
-                if torch.cuda.is_available():
-                    device_capability = torch.cuda.get_device_capability(self.local_rank)
-                    major, minor = device_capability
-                    cuda_capability = major + minor * 0.1
-                    
-                    if cuda_capability >= 7.0:
-                        self.net = torch.compile(self.net, mode='reduce-overhead')
-                        self.net_1 = torch.compile(self.net_1, mode='reduce-overhead')
-                        if self.rank == 0:
-                            self.logger.info(f"🚀 啟用 torch.compile 優化 (CUDA capability: {cuda_capability})")
-                    else:
-                        if self.rank == 0:
-                            self.logger.warning(f"⚠️ 跳過 torch.compile 優化 - GPU CUDA capability {cuda_capability} < 7.0 (不支援Triton)")
-                            self.logger.info("   使用標準PyTorch eager模式訓練")
-                else:
-                    if self.rank == 0:
-                        self.logger.info("CPU模式，跳過torch.compile優化")
-            except Exception as e:
-                if self.rank == 0:
-                    self.logger.warning(f"torch.compile 檢查失敗，使用eager模式: {e}")
+        
 
         # 確保所有張量使用 float32 精度
         self.net = self.net.float()
@@ -284,11 +246,13 @@ class PysicsInformedNeuralNetwork:
         net_state = self.get_model(self.net).state_dict()
         net_1_state = self.get_model(self.net_1).state_dict()
 
+        # 解決 torch.compile 在儲存 optimizer state dict 時的 KeyError
+        # 直接調用基類的方法以繞過編譯後的函數
         checkpoint = {
             'epoch': epoch,
             'net_state_dict': net_state,
             'net_1_state_dict': net_1_state,
-            'optimizer_state_dict': optimizer.state_dict(),
+            'optimizer_state_dict': torch.optim.Optimizer.state_dict(optimizer),
             'Re': self.Re,
             'alpha_evm': self.alpha_evm,
             'current_stage': self.current_stage,
@@ -462,7 +426,7 @@ class PysicsInformedNeuralNetwork:
                      num_outs=num_outs,
                      num_layers=num_layers,
                      hidden_size=hidden_size,
-                     activation=torch.nn.Tanh)
+                     activation=TSA)
 
     def set_eq_training_func(self, train_data_func):
         self.train_data_func = train_data_func
@@ -704,6 +668,10 @@ class PysicsInformedNeuralNetwork:
         # 計算總損失（保持梯度追踪），確保兩個網路都參與
         self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e
         
+        # 添加TSA正則化損失
+        reg_loss = tsa_regularization_loss(self.net) + tsa_regularization_loss(self.net_1)
+        self.loss += reg_loss
+
         # 添加一個小的正則化項確保兩個網路都參與梯度計算
         # 這不會影響訓練結果，但確保DDP工作正常
         if self.world_size > 1:
