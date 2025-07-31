@@ -16,6 +16,8 @@
 # Created: 08.03.2023
 import os
 import torch
+import torch.autograd.functional as F
+import torch.func
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import TensorDataset, DataLoader, DistributedSampler
@@ -344,16 +346,16 @@ class PysicsInformedNeuralNetwork:
             self.u_b = torch.empty(0, 1, requires_grad=target_requires_grad).float().to(self.device)
             self.v_b = torch.empty(0, 1, requires_grad=target_requires_grad).float().to(self.device)
         else:
-            self.x_b = torch.tensor(X[0][start_idx:end_idx], requires_grad=coord_requires_grad).float().to(self.device)
-            self.y_b = torch.tensor(X[1][start_idx:end_idx], requires_grad=coord_requires_grad).float().to(self.device)
-            self.u_b = torch.tensor(X[2][start_idx:end_idx], requires_grad=target_requires_grad).float().to(self.device)
-            self.v_b = torch.tensor(X[3][start_idx:end_idx], requires_grad=target_requires_grad).float().to(self.device)
+            self.x_b = X[0][start_idx:end_idx].clone().detach().requires_grad_(coord_requires_grad)
+            self.y_b = X[1][start_idx:end_idx].clone().detach().requires_grad_(coord_requires_grad)
+            self.u_b = X[2][start_idx:end_idx].clone().detach().requires_grad_(target_requires_grad)
+            self.v_b = X[3][start_idx:end_idx].clone().detach().requires_grad_(target_requires_grad)
             
         if time:
             if start_idx >= end_idx:
                 self.t_b = torch.empty(0, 1, requires_grad=coord_requires_grad).float().to(self.device)
             else:
-                self.t_b = torch.tensor(X[4][start_idx:end_idx], requires_grad=coord_requires_grad).float().to(self.device)
+                self.t_b = X[4][start_idx:end_idx].clone().detach().requires_grad_(coord_requires_grad)
 
         if self.rank == 0:
             print(f"GPU {self.rank}: Processing {end_idx - start_idx} boundary points out of {total_points} total")
@@ -386,10 +388,10 @@ class PysicsInformedNeuralNetwork:
         end_idx = max(start_idx + 1, min(end_idx, total_points))  # 確保至少有1個點
 
         requires_grad = True
-        self.x_f = torch.tensor(X[0][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
-        self.y_f = torch.tensor(X[1][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+        self.x_f = X[0][start_idx:end_idx].clone().detach().requires_grad_(requires_grad)
+        self.y_f = X[1][start_idx:end_idx].clone().detach().requires_grad_(requires_grad)
         if time:
-            self.t_f = torch.tensor(X[2][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+            self.t_f = X[2][start_idx:end_idx].clone().detach().requires_grad_(requires_grad)
 
         if self.rank == 0:
             print(f"GPU {self.rank}: Processing {end_idx - start_idx} equation points out of {total_points} total")
@@ -465,20 +467,50 @@ class PysicsInformedNeuralNetwork:
         e = ee[:, 0:1]
         self.evm = e
 
-        # 優化：批量計算所有一階梯度
-        outputs = [u, v, p]
-        grads = self.compute_gradients_batch(outputs, [x, y])
+        # 優化：使用向量化的 Jacobian 計算所有一階梯度
+        def model_for_jacobian(X_in):
+            uvp = self.net(X_in)
+            return uvp[:, 0:1], uvp[:, 1:2], uvp[:, 2:3]
+
+        # 建立一個可以傳遞給 jacobian 的函數
+        def wrapped_net_uv(X_in):
+            u_out, v_out, _ = model_for_jacobian(X_in)
+            return torch.cat([u_out, v_out], dim=1)
+
+        # 計算 u, v 的 Jacobian
+        J_uv = F.jacobian(lambda X_in: wrapped_net_uv(X_in), X, create_graph=True, vectorize=True)
+        J_uv_diag = J_uv.diagonal(dim1=0, dim2=2).permute(2, 0, 1)
+
+        u_grads = J_uv_diag[:, 0, :]
+        v_grads = J_uv_diag[:, 1, :]
         
-        u_x, u_y = grads[0]
-        v_x, v_y = grads[1]
-        p_x, p_y = grads[2]
-        
-        # 優化：批量計算二階梯度
-        second_order_outputs = [u_x, u_y, v_x, v_y]
-        second_order_inputs = [x, y, x, y]
-        second_grads = self.compute_second_gradients_batch(second_order_outputs, second_order_inputs)
-        
-        u_xx, u_yy, v_xx, v_yy = second_grads
+        u_x, u_y = u_grads[:, 0:1], u_grads[:, 1:2]
+        v_x, v_y = v_grads[:, 0:1], v_grads[:, 1:2]
+
+        # 計算 p 的梯度
+        J_p = F.jacobian(lambda X_in: self.net(X_in)[:, 2:3], X, create_graph=True, vectorize=True)
+        J_p_diag = J_p.diagonal(dim1=0, dim2=2).permute(2, 0, 1)
+        p_grads = J_p_diag[:, 0, :]
+        p_x, p_y = p_grads[:, 0:1], p_grads[:, 1:2]
+
+        # 優化：使用 vmap 和 hessian 高效計算二階導數 (方法一)
+        # 1. 定義處理單一樣本並返回標量的函數
+        def u_func(x_single):
+            # x_single shape: (2,) -> (1, 2) for batch processing
+            return self.net(x_single.unsqueeze(0))[0, 0]
+
+        def v_func(x_single):
+            return self.net(x_single.unsqueeze(0))[0, 1]
+
+        # 2. 使用 vmap 將 hessian 應用於整個批次
+        hess_u = torch.vmap(torch.func.hessian(u_func))(X)
+        hess_v = torch.vmap(torch.func.hessian(v_func))(X)
+
+        # 3. 從 Hessian 對角線提取二階導數
+        u_xx = hess_u[:, 0, 0].unsqueeze(1)
+        u_yy = hess_u[:, 1, 1].unsqueeze(1)
+        v_xx = hess_v[:, 0, 0].unsqueeze(1)
+        v_yy = hess_v[:, 1, 1].unsqueeze(1)
 
         # Get the minum between (vis_t0, vis_t_mius(calculated with last step e))
         batch_size = x.shape[0]
@@ -497,51 +529,7 @@ class PysicsInformedNeuralNetwork:
         residual = (eq1*(u-0.5)+eq2*(v-0.5))-e
         return eq1, eq2, eq3, residual
 
-    def compute_gradients_batch(self, outputs: List[torch.Tensor], inputs: List[torch.Tensor]) -> List[List[torch.Tensor]]:
-        """
-        批量計算多個輸出對多個輸入的梯度，減少autograd調用次數
-        """
-        batch_gradients = []
-        
-        for output in outputs:
-            grad_outputs = [torch.ones_like(output, device=output.device)]
-            grads = torch.autograd.grad(
-                [output],
-                inputs,
-                grad_outputs=grad_outputs,
-                create_graph=True,
-                retain_graph=True,
-                allow_unused=True,
-            )
-            # 處理None梯度
-            processed_grads = [g if g is not None else torch.zeros_like(inputs[i]) for i, g in enumerate(grads)]
-            batch_gradients.append(processed_grads)
-            
-        return batch_gradients
     
-    def compute_second_gradients_batch(self, first_grads: List[torch.Tensor], inputs: List[torch.Tensor]) -> List[torch.Tensor]:
-        """
-        批量計算二階梯度
-        """
-        second_grads = []
-        
-        for i, grad in enumerate(first_grads):
-            input_tensor = inputs[i]
-            grad_outputs = [torch.ones_like(grad, device=grad.device)]
-            second_grad = torch.autograd.grad(
-                [grad],
-                [input_tensor],
-                grad_outputs=grad_outputs,
-                create_graph=True,
-                retain_graph=True,
-                allow_unused=True,
-            )[0]
-            
-            if second_grad is None:
-                second_grad = torch.zeros_like(input_tensor)
-            second_grads.append(second_grad)
-            
-        return second_grads
     
     def _compute_vis_t_optimized(self, batch_size: int, e: torch.Tensor) -> torch.Tensor:
         """
@@ -568,25 +556,7 @@ class PysicsInformedNeuralNetwork:
             
         return vis_t
 
-    def autograd(self, y: torch.Tensor, x: List[torch.Tensor]) -> List[torch.Tensor]:
-        """
-        計算梯度的函數 (保留原函數以兼容性)
-        """
-        grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(y, device=y.device)]
-        grad = torch.autograd.grad(
-            [y],
-            x,
-            grad_outputs=grad_outputs,
-            create_graph=True,
-            retain_graph=True,
-            allow_unused=True,
-        )
-
-        if grad is None:
-            grad = [torch.zeros_like(xx) for xx in x]
-        assert grad is not None
-        grad = [g if g is not None else torch.zeros_like(x[i]) for i, g in enumerate(grad)]
-        return grad
+    
 
     def predict(self, net_params, X):
         x, y = X

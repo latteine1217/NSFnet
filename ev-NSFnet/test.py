@@ -31,64 +31,65 @@ def parse_args():
     return parser.parse_args()
 
 def test_run(run_dir):
-    Re = 5000   # Reynolds number (This should ideally be read from checkpoint or config)
-    N_neu = 80
-    N_neu_1 = 40
-    lam_bcs = 10
-    lam_equ = 1
-    N_f = 200000
-    alpha_evm = 0.03
-    N_HLayer = 6
-    N_HLayer_1 = 4
-
-    # Initialize PINN model (weights will be loaded from checkpoint)
+    # ===================================================================
+    # 1. 使用預設/基礎參數初始化PINN模型
+    #    這些參數將在載入第一個checkpoint時被正確覆寫
+    # ===================================================================
     PINN = psolver.PysicsInformedNeuralNetwork(
-        Re=Re,
-        layers=N_HLayer,
-        layers_1=N_HLayer_1,
-        hidden_size = N_neu,
-        hidden_size_1 = N_neu_1,
-        alpha_evm=alpha_evm,
-        bc_weight=lam_bcs,
-        eq_weight=lam_equ,
-        # net_params and net_params_1 are not needed here as we load full checkpoint
+        Re=1000,      # 臨時值
+        layers=6,     # 臨時值
+        hidden_size=80, # 臨時值
+        # 其他參數可以使用預設值，因為它們也會被checkpoint覆蓋
     )
     
-    # Dummy optimizer for loading checkpoint (state will be overwritten)
+    # 為load_checkpoint準備一個臨時的優化器
     optimizer = torch.optim.Adam(
         list(PINN.get_model_parameters(PINN.net)) + list(PINN.get_model_parameters(PINN.net_1)),
-        lr=0.001, # Dummy learning rate
-        weight_decay=0.0
+        lr=0.001
     )
     PINN.set_optimizers(optimizer)
 
-    path = './data/'
-    dataloader = cavity.DataLoader(path=path, N_f=N_f, N_b=1000)
-
-    filename = f'./data/cavity_Re{Re}_256_Uniform.mat'
-    x_star, y_star, u_star, v_star, p_star = dataloader.loading_evaluate_data(filename)
-
-    # Find all checkpoint files in the run_dir
+    # 找到所有checkpoint檔案
     checkpoint_files = sorted([f for f in os.listdir(run_dir) if re.match(r'checkpoint_epoch_\d+\.pth', f)])
 
     if not checkpoint_files:
         print(f"No checkpoint files found in {run_dir}")
         return
 
+    # ===================================================================
+    # 2. 載入第一個Checkpoint來設定模型參數和物理參數
+    # ===================================================================
+    first_checkpoint_path = os.path.join(run_dir, checkpoint_files[0])
+    print(f"Loading initial configuration from: {first_checkpoint_path}")
+    PINN.load_checkpoint(first_checkpoint_path, optimizer)
+    print(f"Configuration loaded. Re={PINN.Re}, Layers={PINN.layers}, HiddenSize={PINN.hidden_size}")
+
+    # ===================================================================
+    # 3. 根據恢復的參數載入評估數據
+    # ===================================================================
+    path = './data/'
+    dataloader = cavity.DataLoader(path=path, N_f=PINN.N_f, N_b=1000, device=PINN.device)
+    filename = f'./data/cavity_Re{PINN.Re}_256_Uniform.mat'
+    print(f"Loading evaluation data: {filename}")
+    x_star, y_star, u_star, v_star, p_star = dataloader.loading_evaluate_data(filename)
+
+    # ===================================================================
+    # 4. 遍歷所有Checkpoint進行評估
+    # ===================================================================
     for checkpoint_file in checkpoint_files:
         checkpoint_path = os.path.join(run_dir, checkpoint_file)
-        print(f"Evaluating checkpoint: {checkpoint_path}")
+        print(f"\n--- Evaluating checkpoint: {checkpoint_path} ---")
         
-        # Load the checkpoint
-        start_epoch = PINN.load_checkpoint(checkpoint_path, optimizer)
+        # 載入當前checkpoint的權重
+        PINN.load_checkpoint(checkpoint_path, optimizer)
         
-        # Extract epoch from filename for loop parameter
         match = re.search(r'epoch_(\d+)\.pth', checkpoint_file)
         current_epoch = int(match.group(1)) if match else 0
 
-        # Evaluating
+        # 執行評估
         PINN.evaluate(x_star, y_star, u_star, v_star, p_star)
-        PINN.test(x_star, y_star, u_star, v_star, p_star, current_epoch)
+        # PINN.test(x_star, y_star, u_star, v_star, p_star, current_epoch) # test函數會儲存mat檔，可根據需要啟用
+
 
 if __name__ == "__main__":
     is_distributed = setup_distributed()
