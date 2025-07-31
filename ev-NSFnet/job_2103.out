@@ -1,0 +1,67 @@
+Loading modulefiles version 2021.11
+=== GPU Information ===
+Tesla P100-PCIE-16GB, 6.0, 16384
+Tesla P100-PCIE-16GB, 6.0, 16384
+=======================
+Job start: Mon Jul 28 15:33:30 UTC 2025
+🔗 初始化分布式訓練...
+📡 分布式訓練設置完成: 2 GPUs
+   - Backend: NCCL
+   - 每個進程負責 GPU 0
+📂 載入配置文件: configs/production.yaml
+============================================================
+🔧 實驗配置: NSFnet_Re5000_Production
+📝 描述: 高精度Physics-Informed Neural Network for Re=5000 Lid-Driven Cavity Flow
+============================================================
+🧠 網路架構:
+   主網路: 6 層 × 80 神經元
+   EVM網路: 4 層 × 40 神經元
+🎯 訓練設定:
+   方程點數: 120,000
+   批次大小: 全批次
+   總階段數: 6
+⚡ 物理參數:
+   Reynolds數: 5000
+   初始α_EVM: 0.03
+💻 系統配置:
+   設備: auto
+   精度: float32
+   TensorBoard: 啟用
+============================================================
+🚀 創建PINN實例...
+💡 15:33:48 | [32mINFO[0m | 📊 TensorBoard log directory: runs/NSFnet_Re5000_20250728_153348
+💡 15:33:49 | [32mINFO[0m | 🔍 系統信息初始化完成
+💡 15:33:49 | [32mINFO[0m |    CPU: 48 核心
+💡 15:33:49 | [32mINFO[0m |    記憶體: 109.7 GB
+💡 15:33:49 | [32mINFO[0m |    GPU: 0 個設備
+💡 15:33:49 | [32mINFO[0m |    磁碟: 97.9 GB
+💡 15:33:49 | [32mINFO[0m | 🧠 記憶體管理器初始化完成
+⚠️ 15:33:49 | [33mWARNING[0m | ⚠️ 跳過 torch.compile 優化 - GPU CUDA capability 6.0 < 7.0 (不支援Triton)
+💡 15:33:49 | [32mINFO[0m |    使用標準PyTorch eager模式訓練
+💡 15:33:49 | [32mINFO[0m | Distributed training setup:
+💡 15:33:49 | [32mINFO[0m |   World size: 2
+💡 15:33:49 | [32mINFO[0m |   Rank: 0
+💡 15:33:49 | [32mINFO[0m |   Local rank: 0
+💡 15:33:49 | [32mINFO[0m | 💻 系統信息:
+💡 15:33:49 | [32mINFO[0m |    Reynolds數: 5000
+💡 15:33:49 | [32mINFO[0m |    主網路: 6 層 × 80 神經元
+💡 15:33:49 | [32mINFO[0m |    EVM網路: 4 層 × 40 神經元
+💡 15:33:49 | [32mINFO[0m |    訓練點數: 120,000
+💡 15:33:49 | [32mINFO[0m |    設備: cuda:0
+💡 15:33:49 | [32mINFO[0m |    批次大小: 全批次
+📁 載入訓練數據...
+-----------------------------
+N_train_bcs: 2052
+N_train_equ: 120000
+-----------------------------
+-----------------------------
+N_train_bcs: 2052
+N_train_equ: 120000
+-----------------------------
+GPU 0: Processing 1026 boundary points out of 2052 total
+GPU 0: Processing 60000 equation points out of 120000 total
+🚀 開始完整訓練：總共 2,100,000 epochs，分 6 個階段
+   預估完成時間將在訓練開始後計算...
+============================================================
+❌ 訓練過程中發生錯誤: '<=' not supported between instances of 'float' and 'str'
+Job end: Mon Jul 28 15:37:52 UTC 2025
