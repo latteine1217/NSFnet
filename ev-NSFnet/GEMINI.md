@@ -64,7 +64,7 @@
 - 在被告知要建立github repository時，建立.gitignore文件
 
 ## markdwon檔案原則（此處不包含AGENTS.md）
-- README.md 中必須要標示本專案使用opencode+Github Copilot+Gemini開發
+- README.md 中必須要標示本專案使用opencode+Github Copilot開發
 - 避免建立過多的markdown文件來描述專案
 - markdown文件可以多使用emoji來增加豐富度
 

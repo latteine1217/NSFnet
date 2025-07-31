@@ -8,22 +8,7 @@
 
 本專案實現了基於Physics-Informed Neural Networks (PINNs)的NSFnet模型，專門用於解決不可壓縮Navier-Stokes方程的cavity flow問題。採用分散式訓練架構，支援多GPU並行運算。
 
-✨ **開發工具**: 本專案使用 [opencode](https://opencode.ai) + GitHub Copilot + Gemini 聯手開發
-
-## ⚡ 效能優化亮點
-
-本專案經過多輪深度效能調優，解決了傳統PINN實作中的常見瓶頸，確保在目標硬體上發揮最大效率：
-
--   **向量化梯度計算**:
-    -   **一階導數**: 採用 `torch.autograd.functional.jacobian` 搭配 `vectorize=True`，將多個 `autograd.grad` 呼叫合併為單一高效的向量化操作。
-    -   **二階導數**: 採用 `torch.func.hessian` 結合 `torch.vmap`，一次性計算整個批次的Hessian對角線元素，徹底取代了逐點、多次求導的低效率做法。
-
--   **高效資料預處理**:
-    -   **一次性生成與快取**: 訓練與邊界資料點在訓練開始時一次性生成，並直接轉換為PyTorch張量快取在目標設備（CPU/GPU）上。
-    -   **零CPU開銷**: 訓練迴圈中無任何NumPy操作或資料重建，避免了Python的效能開銷與不必要的CPU-GPU資料傳輸。
-
--   **CuDNN自動調優**:
-    -   啟用 `torch.backends.cudnn.benchmark = True`，讓CuDNN能針對固定的輸入尺寸，自動選擇最快的底層卷積演算法。
+✨ **開發工具**: 本專案使用 [opencode](https://opencode.ai) + GitHub Copilot 開發
 
 ## 🏗️ 系統架構
 

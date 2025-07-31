@@ -10,8 +10,6 @@ import cavity_data as cavity
 from config import ConfigManager
 import argparse
 
-torch.backends.cudnn.benchmark = True
-
 def parse_args():
     """解析命令行參數"""
     parser = argparse.ArgumentParser(description='PINN Training with Configuration Management')
@@ -115,14 +113,15 @@ def main():
         if args.dry_run:
             return
 
-        # ===================================================================
-        # 1. 初始化模型和優化器
-        # ===================================================================
+        # Enable anomaly detection to find the operation that failed to compute its gradient
+        torch.autograd.set_detect_anomaly(True)
+        
+        # 只在主進程顯示PINN創建信息
         if rank == 0:
-            print("🚀 創建PINN實例和優化器...")
-
+            print("🚀 創建PINN實例...")
+        
         PINN = psolver.PysicsInformedNeuralNetwork(
-            Re=config.physics.Re, # 初始Re，可能被checkpoint覆蓋
+            Re=config.physics.Re,
             layers=config.network.layers,
             layers_1=config.network.layers_1,
             hidden_size=config.network.hidden_size,
@@ -134,58 +133,26 @@ def main():
             eq_weight=config.physics.eq_weight,
             checkpoint_freq=config.training.checkpoint_freq
         )
-
-        optimizer = torch.optim.Adam(
-            list(PINN.get_model_parameters(PINN.net)) + list(PINN.get_model_parameters(PINN.net_1)),
-            lr=config.training.training_stages[0][2], # 初始學習率
-            weight_decay=0.0
-        )
-        PINN.set_optimizers(optimizer)
-
-        # ===================================================================
-        # 2. 載入Checkpoint (如果提供)
-        #    這一步會覆蓋模型參數和Re等物理參數
-        # ===================================================================
-        start_epoch = 0
-        if args.resume:
-            if rank == 0:
-                print(f"🔄 正在從檢查點恢復: {args.resume}")
-            start_epoch = PINN.load_checkpoint(args.resume, optimizer)
-            if rank == 0:
-                if start_epoch > 0:
-                    print(f"✅ 成功恢復，將從 epoch {start_epoch} 開始")
-                    print(f"   恢復後的 Reynolds 數: {PINN.Re}")
-                else:
-                    print("⚠️ 無法載入檢查點，將從頭開始訓練")
-
-        # ===================================================================
-        # 3. 載入並設定訓練數據 (使用恢復後的參數)
-        # ===================================================================
+        
+        # 只在主進程顯示數據載入信息
         if rank == 0:
             print("📁 載入訓練數據...")
-            print(f"   為 Reynolds 數 = {PINN.Re} 準備數據")
-
+        
         path = './data/'
-        # 注意：此處的 N_f 應與 PINN 實例化時一致
-        dataloader = cavity.DataLoader(
-            path=path, 
-            N_f=PINN.N_f, 
-            N_b=1000, 
-            device=PINN.device
-        )
+        dataloader = cavity.DataLoader(path=path, N_f=config.training.N_f, N_b=1000)
 
+        # Set boundary data, | u, v, x, y
         boundary_data = dataloader.loading_boundary_data()
         PINN.set_boundary_data(X=boundary_data)
 
+        # Set training data, | x, y
         training_data = dataloader.loading_training_data()
         PINN.set_eq_training_data(X=training_data)
 
-        filename = f'./data/cavity_Re{PINN.Re}_256_Uniform.mat'
+        filename = f'./data/cavity_Re{config.physics.Re}_256_Uniform.mat'
         x_star, y_star, u_star, v_star, p_star = dataloader.loading_evaluate_data(filename)
 
-        # ===================================================================
-        # 4. 開始訓練流程
-        # ===================================================================
+        # 使用配置中的訓練階段
         training_stages = []
         for i, (alpha, epochs, lr) in enumerate(config.training.training_stages):
             stage_name = f"Stage {i+1}"
