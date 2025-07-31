@@ -251,7 +251,7 @@ class PysicsInformedNeuralNetwork:
             'epoch': epoch,
             'net_state_dict': net_state,
             'net_1_state_dict': net_1_state,
-            'optimizer_state_dict': torch.optim.Optimizer.state_dict(optimizer),
+            'optimizer_state_dict': optimizer.state_dict(),
             'Re': self.Re,
             'alpha_evm': self.alpha_evm,
             'current_stage': self.current_stage,
