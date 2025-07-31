@@ -955,11 +955,16 @@ class PysicsInformedNeuralNetwork:
             if param.requires_grad:
                 active_params.append(param)
         
+        # 重新初始化優化器以確保參數組同步
         if len(active_params) > 0:
-            # 更新參數列表，但保持學習率不變
             current_lr = self.opt.param_groups[0]['lr']
-            self.opt.param_groups[0]['params'] = active_params
-            self.opt.param_groups[0]['lr'] = current_lr
+            optimizer_class = type(self.opt)
+            self.opt = optimizer_class(active_params, lr=current_lr)
+            if self.rank == 0:
+                print(f"  Optimizer reinitialized with {len(active_params)} parameters (net only).")
+        else:
+            if self.rank == 0:
+                print("  No active parameters found for main network, optimizer not reinitialized.")
         
         if self.rank == 0:
             print(f"  Active parameters: {len(active_params)} (net only)")
@@ -981,11 +986,16 @@ class PysicsInformedNeuralNetwork:
             if param.requires_grad:
                 all_params.append(param)
         
+        # 重新初始化優化器以確保參數組同步
         if len(all_params) > 0:
-            # 更新參數列表，保持當前學習率
             current_lr = self.opt.param_groups[0]['lr']
-            self.opt.param_groups[0]['params'] = all_params
-            self.opt.param_groups[0]['lr'] = current_lr
+            optimizer_class = type(self.opt)
+            self.opt = optimizer_class(all_params, lr=current_lr)
+            if self.rank == 0:
+                print(f"  Optimizer reinitialized with {len(all_params)} parameters (net + net_1).")
+        else:
+            if self.rank == 0:
+                print("  No active parameters found for both networks, optimizer not reinitialized.")
         
         if self.rank == 0:
             print(f"  Active parameters: {len(all_params)} (net + net_1)")
