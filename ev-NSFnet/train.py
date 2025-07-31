@@ -10,6 +10,8 @@ import cavity_data as cavity
 from config import ConfigManager
 import argparse
 
+torch.backends.cudnn.benchmark = True
+
 def parse_args():
     """解析命令行參數"""
     parser = argparse.ArgumentParser(description='PINN Training with Configuration Management')
@@ -27,8 +29,6 @@ def parse_args():
 def setup_distributed():
     """設置分布式訓練環境"""
     # 檢查分布式環境變數
-    print("OMP_NUM_THREADS =", os.environ.get("OMP_NUM_THREADS"))
-    print("torch.get_num_threads() =", torch.get_num_threads())
     if 'RANK' not in os.environ:
         print("💻 單GPU模式")
         os.environ['RANK'] = '0'

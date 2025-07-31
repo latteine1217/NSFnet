@@ -126,3 +126,6 @@ dmypy.json
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+*.out
+*.err
