@@ -175,18 +175,16 @@ class PysicsInformedNeuralNetwork:
 
         # Wrap models with DDP only if in distributed mode
         if self.world_size > 1:
-            # 使用find_unused_parameters=True支援動態參數凍結，避免使用static_graph避免警告
+            # 固定前向路徑以關閉未用參數掃描
             self.net = DDP(self.net, 
                            device_ids=[self.local_rank], 
                            output_device=self.local_rank,
-                           find_unused_parameters=True,   # 支援動態凍結功能
-                           broadcast_buffers=True,        # 確保buffer同步
+                              find_unused_parameters=False,                           broadcast_buffers=True,        # 確保buffer同步
                            gradient_as_bucket_view=True)  # 提升記憶體效率
             self.net_1 = DDP(self.net_1, 
                              device_ids=[self.local_rank], 
                              output_device=self.local_rank,
-                             find_unused_parameters=True,   # 支援動態凍結功能
-                             broadcast_buffers=True,        # 確保buffer同步
+                           find_unused_parameters=False,                             broadcast_buffers=True,        # 確保buffer同步
                              gradient_as_bucket_view=True)  # 提升記憶體效率
 
         if net_params:

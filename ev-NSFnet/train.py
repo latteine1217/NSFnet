@@ -116,7 +116,7 @@ def main():
             return
 
         # Enable anomaly detection to find the operation that failed to compute its gradient
-        torch.autograd.set_detect_anomaly(True)
+        torch.autograd.set_detect_anomaly(False)
         
         # 只在主進程顯示PINN創建信息
         if rank == 0:
