@@ -772,7 +772,7 @@ class PysicsInformedNeuralNetwork:
                 self.freeze_evm_net(epoch_id)
 
             # 清除上一個epoch的梯度
-                                self.opt.zero_grad(set_to_none=True)
+            self.opt.zero_grad(set_to_none=True)
             # 使用標準float32精度進行計算
             loss, losses = loss_func()
             
