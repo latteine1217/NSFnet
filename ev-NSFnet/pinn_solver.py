@@ -830,18 +830,14 @@ class PysicsInformedNeuralNetwork:
                         if retry_count < max_retry_attempts:
                             self.logger.info("   Attempting DDP recovery...")
                             
-                            # 嘗試重建optimizer參數群組
-                            try:
-                                self.rebuild_optimizer_groups()
-                                # 清空梯度並重新同步
+                                # 嘗試重建optimizer參數群組與重新同步
                                 try:
                                     self.rebuild_optimizer_groups()
                                     self.opt.zero_grad(set_to_none=True)
                                     if torch.cuda.is_available():
                                         torch.cuda.synchronize()
                                 except Exception as recovery_e:
-                                    self.logger.error(f"   DDP recovery failed: {recovery_e}")
-                        else:
+                                    self.logger.error(f"   DDP recovery failed: {recovery_e}")                        else:
                             self.logger.error(f"DDP recovery failed after {max_retry_attempts} attempts, skipping step...")
                             break
                     else:
