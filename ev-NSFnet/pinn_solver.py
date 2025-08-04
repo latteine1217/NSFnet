@@ -313,91 +313,21 @@ class PysicsInformedNeuralNetwork:
         self.vis_t_minus_gpu = self.alpha_evm*torch.abs(e).detach()  # 保持在GPU上
 
     def set_boundary_data(self, X=None, time=False):
-        # Split boundary data across GPUs
-        total_points = X[0].shape[0]
-        
-        # 確保每個GPU至少有一些數據點
-        if total_points < self.world_size:
-            if self.rank == 0:
-                print(f"WARNING: Only {total_points} boundary points for {self.world_size} GPUs")
-            # 如果數據點少於GPU數量，只有部分GPU處理數據
-            if self.rank < total_points:
-                start_idx = self.rank
-                end_idx = self.rank + 1
-            else:
-                # 沒有數據的GPU使用空張量
-                start_idx = 0
-                end_idx = 0
-        else:
-            points_per_gpu = total_points // self.world_size
-            start_idx = self.rank * points_per_gpu
-            end_idx = start_idx + points_per_gpu if self.rank < self.world_size - 1 else total_points
-
-        # 檢查索引邊界
-        start_idx = max(0, min(start_idx, total_points))
-        end_idx = max(start_idx, min(end_idx, total_points))
-        
-        # 邊界條件數據不需要梯度，只需要進行前向計算
-        coord_requires_grad = False  # 邊界座標不需要梯度
-        target_requires_grad = False # u, v 標準答案不需要梯度
-        
-        # 如果沒有數據點，創建空張量
-        if start_idx >= end_idx:
-            self.x_b = torch.empty(0, 1, requires_grad=coord_requires_grad).float().to(self.device)
-            self.y_b = torch.empty(0, 1, requires_grad=coord_requires_grad).float().to(self.device)
-            self.u_b = torch.empty(0, 1, requires_grad=target_requires_grad).float().to(self.device)
-            self.v_b = torch.empty(0, 1, requires_grad=target_requires_grad).float().to(self.device)
-        else:
-            self.x_b = torch.tensor(X[0][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=coord_requires_grad).contiguous()
-            self.y_b = torch.tensor(X[1][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=coord_requires_grad).contiguous()
-            self.u_b = torch.tensor(X[2][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=target_requires_grad).contiguous()
-            self.v_b = torch.tensor(X[3][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=target_requires_grad).contiguous()
-            
-        if time:
-            if start_idx >= end_idx:
-                self.t_b = torch.empty(0, 1, requires_grad=coord_requires_grad).float().to(self.device)
-            else:
-                self.t_b = torch.tensor(X[4][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=coord_requires_grad).contiguous()
-
-        if self.rank == 0:
-            print(f"GPU {self.rank}: Processing {end_idx - start_idx} boundary points out of {total_points} total")
-
+        # 接受已切片且在正確裝置上的張量，直接賦值
+        self.x_b, self.y_b, self.u_b, self.v_b = X
+        if time and len(X) > 4:
+            self.t_b = X[4]
+        total_points = (self.x_b.shape[0] if isinstance(self.x_b, torch.Tensor) else 0)
     def set_eq_training_data(self,
                              X=None,
                              time=False):
-        # Split equation training data across GPUs
-        total_points = X[0].shape[0]
-        
-        # 確保每個GPU至少有一些數據點
-        if total_points < self.world_size:
-            if self.rank == 0:
-                print(f"WARNING: Only {total_points} training points for {self.world_size} GPUs")
-            # 如果數據點少於GPU數量，只有部分GPU處理數據
-            if self.rank < total_points:
-                start_idx = self.rank
-                end_idx = self.rank + 1
-            else:
-                # 沒有數據的GPU使用最小集合
-                start_idx = 0
-                end_idx = 1
-        else:
-            points_per_gpu = total_points // self.world_size
-            start_idx = self.rank * points_per_gpu
-            end_idx = start_idx + points_per_gpu if self.rank < self.world_size - 1 else total_points
-
-        # 檢查索引邊界
-        start_idx = max(0, min(start_idx, total_points))
-        end_idx = max(start_idx + 1, min(end_idx, total_points))  # 確保至少有1個點
-
-        requires_grad = True
-        self.x_f = torch.tensor(X[0][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=requires_grad).contiguous()
-        self.y_f = torch.tensor(X[1][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=requires_grad).contiguous()
-        if time:
-            self.t_f = torch.tensor(X[2][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=requires_grad).contiguous()
-
+        # 接受已切片且在正確裝置上的張量，直接賦值
+        self.x_f, self.y_f = X[:2]
+        if time and len(X) > 2:
+            self.t_f = X[2]
+        total_points = (self.x_f.shape[0] if isinstance(self.x_f, torch.Tensor) else 0)
         if self.rank == 0:
-            print(f"GPU {self.rank}: Processing {end_idx - start_idx} equation points out of {total_points} total")
-
+            print(f"GPU {self.rank}: Processing {total_points} equation points")
         self.init_vis_t()
 
     def set_optimizers(self, opt):

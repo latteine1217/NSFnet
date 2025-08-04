@@ -144,12 +144,54 @@ def main():
         dataloader = cavity.DataLoader(path=path, N_f=config.training.N_f, N_b=1000)
 
         # Set boundary data, | u, v, x, y
-        boundary_data = dataloader.loading_boundary_data()
-        PINN.set_boundary_data(X=boundary_data)
+        boundary_np = dataloader.loading_boundary_data()
+        xb_cpu = torch.as_tensor(boundary_np[0], dtype=torch.float32).contiguous()
+        yb_cpu = torch.as_tensor(boundary_np[1], dtype=torch.float32).contiguous()
+        ub_cpu = torch.as_tensor(boundary_np[2], dtype=torch.float32).contiguous()
+        vb_cpu = torch.as_tensor(boundary_np[3], dtype=torch.float32).contiguous()
+        total_b = xb_cpu.shape[0]
+        world_size = int(os.environ.get('WORLD_SIZE', '1'))
+        r = rank
+        if total_b < world_size:
+            if r < total_b:
+                b_start, b_end = r, r+1
+            else:
+                b_start, b_end = 0, 0
+        else:
+            per = total_b // world_size
+            b_start = r * per
+            b_end = b_start + per if r < world_size - 1 else total_b
+        if dist.is_initialized():
+            idx = [b_start, b_end]
+            dist.broadcast_object_list(idx, src=0)
+            b_start, b_end = idx
+        xb = xb_cpu[b_start:b_end].to(PINN.device)
+        yb = yb_cpu[b_start:b_end].to(PINN.device)
+        ub = ub_cpu[b_start:b_end].to(PINN.device)
+        vb = vb_cpu[b_start:b_end].to(PINN.device)
+        PINN.set_boundary_data(X=(xb, yb, ub, vb))
 
         # Set training data, | x, y
-        training_data = dataloader.loading_training_data()
-        PINN.set_eq_training_data(X=training_data)
+        eq_np = dataloader.loading_training_data()
+        xf_cpu = torch.as_tensor(eq_np[0], dtype=torch.float32).contiguous()
+        yf_cpu = torch.as_tensor(eq_np[1], dtype=torch.float32).contiguous()
+        total_f = xf_cpu.shape[0]
+        if total_f < world_size:
+            if r < total_f:
+                f_start, f_end = r, r+1
+            else:
+                f_start, f_end = 0, 1
+        else:
+            per_f = total_f // world_size
+            f_start = r * per_f
+            f_end = f_start + per_f if r < world_size - 1 else total_f
+        if dist.is_initialized():
+            idxf = [f_start, f_end]
+            dist.broadcast_object_list(idxf, src=0)
+            f_start, f_end = idxf
+        xf = xf_cpu[f_start:f_end].to(PINN.device)
+        yf = yf_cpu[f_start:f_end].to(PINN.device)
+        PINN.set_eq_training_data(X=(xf, yf))
 
         filename = f'./data/cavity_Re{config.physics.Re}_256_Uniform.mat'
         x_star, y_star, u_star, v_star, p_star = dataloader.loading_evaluate_data(filename)
