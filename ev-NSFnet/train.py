@@ -189,8 +189,8 @@ def main():
             idxf = [f_start, f_end]
             dist.broadcast_object_list(idxf, src=0)
             f_start, f_end = idxf
-        xf = xf_cpu[f_start:f_end].to(PINN.device)
-        yf = yf_cpu[f_start:f_end].to(PINN.device)
+        xf = xf_cpu[f_start:f_end].to(PINN.device).contiguous().requires_grad_(True)
+        yf = yf_cpu[f_start:f_end].to(PINN.device).contiguous().requires_grad_(True)
         PINN.set_eq_training_data(X=(xf, yf))
 
         filename = f'./data/cavity_Re{config.physics.Re}_256_Uniform.mat'

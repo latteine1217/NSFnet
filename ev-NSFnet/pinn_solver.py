@@ -325,6 +325,11 @@ class PysicsInformedNeuralNetwork:
         self.x_f, self.y_f = X[:2]
         if time and len(X) > 2:
             self.t_f = X[2]
+        # Ensure gradients for PDE points
+        if isinstance(self.x_f, torch.Tensor):
+            self.x_f.requires_grad_(True)
+        if isinstance(self.y_f, torch.Tensor):
+            self.y_f.requires_grad_(True)
         total_points = (self.x_f.shape[0] if isinstance(self.x_f, torch.Tensor) else 0)
         if self.rank == 0:
             print(f"GPU {self.rank}: Processing {total_points} equation points")
