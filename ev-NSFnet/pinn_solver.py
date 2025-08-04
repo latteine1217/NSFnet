@@ -29,8 +29,8 @@ import warnings
 import time
 import datetime
 from logger import LoggerFactory, PINNLogger
-from health_monitor import TrainingHealthMonitor, HealthThresholds
-from memory_manager import TrainingMemoryManager
+# from health_monitor import TrainingHealthMonitor, HealthThresholds
+# from memory_manager import TrainingMemoryManager
 
 
 
@@ -147,28 +147,8 @@ class PysicsInformedNeuralNetwork:
         self.global_step_offset = 0  # 用於計算跨階段的global step
 
         # 健康監控系統
-        if self.rank == 0:  # 只在主進程啟用健康監控
-            health_thresholds = HealthThresholds(
-                gpu_memory_warning=90.0,
-                process_memory_warning=12000.0,  # 12GB
-                cpu_warning=85.0
-            )
-            self.health_monitor = TrainingHealthMonitor(
-                logger=self.logger,
-                thresholds=health_thresholds,
-                check_interval=60.0  # 每分鐘檢查一次
-            )
-            
-            # 記憶體管理系統
-            self.memory_manager = TrainingMemoryManager(
-                logger=self.logger,
-                cpu_threshold=80.0,
-                gpu_threshold=85.0,
-                auto_cleanup_interval=300.0  # 5分鐘自動清理
-            )
-        else:
-            self.health_monitor = None
-            self.memory_manager = None
+        self.health_monitor = None
+        self.memory_manager = None
 
         self.alpha_evm = alpha_evm
         self.alpha_b = bc_weight
@@ -756,12 +736,7 @@ class PysicsInformedNeuralNetwork:
                 self.training_start_time = time.time()
                 
             # 啟動健康監控
-            if self.health_monitor and not self.health_monitor.is_monitoring:
-                self.health_monitor.start_training_monitoring()
-                
-            # 啟動記憶體管理
-            if self.memory_manager:
-                self.memory_manager.optimize_for_training()
+
         
         if self.rank == 0:
             training_info = {
@@ -916,59 +891,30 @@ class PysicsInformedNeuralNetwork:
                         self.safe_tensorboard_log('System/GPU_Memory_GB', memory_allocated, global_step)
                 
                 # 健康檢查 (每100個epoch檢查一次)
-                if self.health_monitor and epoch_id % 100 == 0:
-                    is_healthy = self.health_monitor.check_training_health(epoch_id, epoch_loss)
-                    if not is_healthy:
-                        self.logger.warning("⚕️ 系統健康檢查發現問題，考慮調整訓練參數")
-                        
-                        # 緊急情況下執行清理
-                        try:
-                            self.health_monitor.emergency_cleanup()
-                        except Exception as cleanup_error:
-                            self.logger.error(f"緊急清理失敗: {cleanup_error}")
+
+
                 
                 # 記憶體監控 (每50個epoch檢查一次)
-                if self.memory_manager and epoch_id % 50 == 0:
-                    memory_ok = self.memory_manager.monitor_training_memory(epoch_id, epoch_loss)
-                    if not memory_ok:
-                        self.logger.critical("💾 記憶體使用危險，建議調整訓練參數或重啟訓練")
+
             
             # 每1000個epoch輸出一次訓練狀況，首個epoch也要輸出
             if self.rank == 0 and (epoch_id == 0 or (epoch_id + 1) % 1000 == 0 or epoch_id == num_epoch - 1):
                 self.print_log_full_batch_with_time_estimate(epoch_loss, epoch_losses, epoch_id, num_epoch, actual_data_points)
                 
                 # 每1000個epoch輸出健康和記憶體報告
-                if epoch_id == 0 or epoch_id % 1000 == 0:
-                    if self.health_monitor:
-                        self.health_monitor.log_health_report()
-                    if self.memory_manager:
-                        self.memory_manager.log_memory_report()
+
 
             # Save checkpoint
             if self.rank == 0 and (epoch_id > 0 and epoch_id % self.checkpoint_freq == 0 or epoch_id == num_epoch - 1):
                 self.save_checkpoint(epoch_id, self.opt)
-                if self.health_monitor:
-                    self.health_monitor.last_checkpoint_time = time.time()
+
 
         # 階段結束後更新global step offset
         if self.rank == 0:
             self.global_step_offset += num_epoch
             
             # 階段結束時的最終清理和統計
-            if self.memory_manager:
-                self.logger.info("🧹 訓練階段結束，執行最終記憶體清理...")
-                final_cleanup = self.memory_manager.cleanup_memory(force=True)
-                
-                # 記憶體洩漏檢測
-                leaks = self.memory_manager.detect_memory_leaks()
-                if leaks:
-                    self.logger.warning("🔍 檢測到記憶體洩漏，請檢查代碼")
-                
-                # 輸出訓練記憶體摘要
-                memory_summary = self.memory_manager.get_training_memory_summary()
-                self.logger.info(f"📊 訓練記憶體摘要: 峰值={memory_summary['peak_memory_mb']:.1f}MB, "
-                               f"清理次數={memory_summary['cleanup_count']}, "
-                               f"緩存命中率={memory_summary['cache_hit_rate']:.1f}%")
+
     
     def freeze_evm_net(self, epoch_id):
         """
