@@ -795,8 +795,7 @@ class PysicsInformedNeuralNetwork:
             )
             
             # 更新參數
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+
             
             # 檢查DDP狀態並嘗試恢復
             max_retry_attempts = 3
