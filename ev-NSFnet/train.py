@@ -257,14 +257,21 @@ def main():
             if rank == 0:
                 os.makedirs(profiler_log_dir, exist_ok=True)
             
-            with torch.profiler.profile(
-                schedule=torch.profiler.schedule(wait=1, warmup=1, active=2, repeat=1),
-                on_trace_ready=None,
-                record_shapes=False,
-                with_stack=False,
-                profile_memory=False
-            ) as prof:
-                PINN.train(num_epoch=epochs_to_run, lr=learning_rate, scheduler=stage_scheduler, profiler=prof, start_epoch=start_epoch)
+            do_profile = (start_epoch % 20000 == 0)
+            if do_profile:
+                with torch.profiler.profile(
+                    schedule=torch.profiler.schedule(wait=1, warmup=1, active=2, repeat=1),
+                    on_trace_ready=None,
+                    record_shapes=False,
+                    with_stack=False,
+                    profile_memory=False
+                ) as prof:
+                    PINN.train(num_epoch=epochs_to_run, lr=learning_rate, scheduler=stage_scheduler, profiler=prof, start_epoch=start_epoch)
+            else:
+                class _Noop:
+                    def step(self):
+                        pass
+                PINN.train(num_epoch=epochs_to_run, lr=learning_rate, scheduler=stage_scheduler, profiler=_Noop(), start_epoch=start_epoch)
 
             stage_time = time.time() - start_time
             
