@@ -10,7 +10,7 @@ network:
 training:
   N_f: 120000
   batch_size: null  # 全批次訓練
-  checkpoint_freq: 10000       # 檢查點保存頻率
+  checkpoint_freq: 20000       # 檢查點保存頻率
   training_stages:
     - [0.05, 300000, 1e-3]   # Stage 1
     - [0.03, 300000, 2e-4]   # Stage 2

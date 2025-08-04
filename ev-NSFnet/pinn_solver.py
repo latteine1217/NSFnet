@@ -772,8 +772,7 @@ class PysicsInformedNeuralNetwork:
                 self.freeze_evm_net(epoch_id)
 
             # 清除上一個epoch的梯度
-            self.opt.zero_grad()
-
+                                self.opt.zero_grad(set_to_none=True)
             # 使用標準float32精度進行計算
             loss, losses = loss_func()
             
@@ -835,8 +834,7 @@ class PysicsInformedNeuralNetwork:
                             try:
                                 self.rebuild_optimizer_groups()
                                 # 清空梯度並重新同步
-                                self.opt.zero_grad()
-                                if torch.cuda.is_available():
+            self.opt.zero_grad(set_to_none=True)                                if torch.cuda.is_available():
                                     torch.cuda.synchronize()
                                     
                             except Exception as recovery_e:
