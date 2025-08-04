@@ -38,6 +38,35 @@ from memory_manager import TrainingMemoryManager
 warnings.filterwarnings("ignore", message=".*c10d::allreduce_.*autograd kernel.*")
 
 class PysicsInformedNeuralNetwork:
+    def _param_name_map(self, model):
+        return {id(p): n for n, p in model.named_parameters()}
+
+    def _safe_optimizer_state_dict(self, optimizer):
+        try:
+            state = optimizer.state
+            param_ids = set(id(p) for g in optimizer.param_groups for p in g.get('params', []))
+            safe_state = {}
+            for k, v in state.items():
+                if k in param_ids:
+                    safe_state[k] = v
+            pg = []
+            for g in optimizer.param_groups:
+                pg.append({k: v for k, v in g.items() if k != 'params'})
+            return {'state': safe_state, 'param_groups': pg}
+        except Exception:
+            return {}
+
+    def _load_optimizer_state_dict_safe(self, optimizer, opt_state):
+        try:
+            if not opt_state:
+                return
+            optimizer.load_state_dict(opt_state)
+            for state in optimizer.state.values():
+                for k, v in list(state.items()):
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(self.device)
+        except Exception:
+            pass
     # Initialize the class
     def __init__(self,
                  opt=None,
@@ -252,7 +281,7 @@ class PysicsInformedNeuralNetwork:
             'net_state_dict': net_state,
             'net_1_state_dict': net_1_state,
             # safe optimizer state_dict to avoid KeyError when params changed
-            'optimizer_state_dict': (optimizer.state_dict() if hasattr(optimizer, 'state_dict') else {}),
+            'optimizer_state_dict': self._safe_optimizer_state_dict(optimizer),
             'Re': self.Re,
             'alpha_evm': self.alpha_evm,
             'current_stage': self.current_stage,
@@ -282,7 +311,7 @@ class PysicsInformedNeuralNetwork:
             # Load optimizer state if available
             opt_state = checkpoint.get('optimizer_state_dict', None)
             if opt_state:
-                optimizer.load_state_dict(opt_state)
+                self._load_optimizer_state_dict_safe(optimizer, opt_state)
 
             # Load training state
             start_epoch = checkpoint['epoch'] + 1
