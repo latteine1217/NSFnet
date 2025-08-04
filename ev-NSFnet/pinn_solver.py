@@ -1,13 +1,7 @@
 # Copyright (c) 2023 scien42.tech, Se42 Authors. All Rights Reserved.
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+        
+        
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
@@ -354,16 +348,16 @@ class PysicsInformedNeuralNetwork:
             self.u_b = torch.empty(0, 1, requires_grad=target_requires_grad).float().to(self.device)
             self.v_b = torch.empty(0, 1, requires_grad=target_requires_grad).float().to(self.device)
         else:
-            self.x_b = torch.tensor(X[0][start_idx:end_idx], requires_grad=coord_requires_grad).float().to(self.device)
-            self.y_b = torch.tensor(X[1][start_idx:end_idx], requires_grad=coord_requires_grad).float().to(self.device)
-            self.u_b = torch.tensor(X[2][start_idx:end_idx], requires_grad=target_requires_grad).float().to(self.device)
-            self.v_b = torch.tensor(X[3][start_idx:end_idx], requires_grad=target_requires_grad).float().to(self.device)
+            self.x_b = torch.tensor(X[0][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=coord_requires_grad).contiguous()
+            self.y_b = torch.tensor(X[1][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=coord_requires_grad).contiguous()
+            self.u_b = torch.tensor(X[2][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=target_requires_grad).contiguous()
+            self.v_b = torch.tensor(X[3][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=target_requires_grad).contiguous()
             
         if time:
             if start_idx >= end_idx:
                 self.t_b = torch.empty(0, 1, requires_grad=coord_requires_grad).float().to(self.device)
             else:
-                self.t_b = torch.tensor(X[4][start_idx:end_idx], requires_grad=coord_requires_grad).float().to(self.device)
+                self.t_b = torch.tensor(X[4][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=coord_requires_grad).contiguous()
 
         if self.rank == 0:
             print(f"GPU {self.rank}: Processing {end_idx - start_idx} boundary points out of {total_points} total")
@@ -396,10 +390,10 @@ class PysicsInformedNeuralNetwork:
         end_idx = max(start_idx + 1, min(end_idx, total_points))  # 確保至少有1個點
 
         requires_grad = True
-        self.x_f = torch.tensor(X[0][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
-        self.y_f = torch.tensor(X[1][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+        self.x_f = torch.tensor(X[0][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=requires_grad).contiguous()
+        self.y_f = torch.tensor(X[1][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=requires_grad).contiguous()
         if time:
-            self.t_f = torch.tensor(X[2][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+            self.t_f = torch.tensor(X[2][start_idx:end_idx], dtype=torch.float32, device=self.device, requires_grad=requires_grad).contiguous()
 
         if self.rank == 0:
             print(f"GPU {self.rank}: Processing {end_idx - start_idx} equation points out of {total_points} total")
@@ -658,12 +652,12 @@ class PysicsInformedNeuralNetwork:
         # 跨GPU聚合損失以獲得全局損失值
         if self.world_size > 1:
             # 聚合邊界損失 - 使用 detach() 避免 autograd 警告
-            loss_b_detached = self.loss_b.detach().clone()
+            loss_b_detached = self.loss_b.detach()
             dist.all_reduce(loss_b_detached, op=dist.ReduceOp.SUM)
             loss_b_avg = loss_b_detached / self.world_size
             
             # 聚合方程損失 - 使用 detach() 避免 autograd 警告  
-            loss_e_detached = self.loss_e.detach().clone()
+            loss_e_detached = self.loss_e.detach()
             dist.all_reduce(loss_e_detached, op=dist.ReduceOp.SUM)
             loss_e_avg = loss_e_detached / self.world_size
             
