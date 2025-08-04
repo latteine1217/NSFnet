@@ -252,11 +252,7 @@ class PysicsInformedNeuralNetwork:
             'net_state_dict': net_state,
             'net_1_state_dict': net_1_state,
             # safe optimizer state_dict to avoid KeyError when params changed
-            try:
-                _opt_state = optimizer.state_dict()
-            except Exception:
-                _opt_state = {}
-            'optimizer_state_dict': _opt_state,
+            'optimizer_state_dict': (optimizer.state_dict() if hasattr(optimizer, 'state_dict') else {}),
             'Re': self.Re,
             'alpha_evm': self.alpha_evm,
             'current_stage': self.current_stage,
