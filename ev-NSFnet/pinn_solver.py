@@ -251,7 +251,12 @@ class PysicsInformedNeuralNetwork:
             'epoch': epoch,
             'net_state_dict': net_state,
             'net_1_state_dict': net_1_state,
-            'optimizer_state_dict': optimizer.state_dict(),
+            # safe optimizer state_dict to avoid KeyError when params changed
+            try:
+                _opt_state = optimizer.state_dict()
+            except Exception:
+                _opt_state = {}
+            'optimizer_state_dict': _opt_state,
             'Re': self.Re,
             'alpha_evm': self.alpha_evm,
             'current_stage': self.current_stage,
@@ -278,8 +283,10 @@ class PysicsInformedNeuralNetwork:
             self.get_model(self.net).load_state_dict(checkpoint['net_state_dict'])
             self.get_model(self.net_1).load_state_dict(checkpoint['net_1_state_dict'])
 
-            # Load optimizer state
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # Load optimizer state if available
+            opt_state = checkpoint.get('optimizer_state_dict', None)
+            if opt_state:
+                optimizer.load_state_dict(opt_state)
 
             # Load training state
             start_epoch = checkpoint['epoch'] + 1
@@ -960,8 +967,9 @@ class PysicsInformedNeuralNetwork:
             current_lr = self.opt.param_groups[0]['lr']
             optimizer_class = type(self.opt)
             self.opt = optimizer_class(active_params, lr=current_lr)
+            self.opt.state.clear()
             if self.rank == 0:
-                print(f"  Optimizer reinitialized with {len(active_params)} parameters (net only).")
+                print(f"  Optimizer reinitialized with {len(active_params)} parameters (net only), state cleared.")
         else:
             if self.rank == 0:
                 print("  No active parameters found for main network, optimizer not reinitialized.")
@@ -991,8 +999,9 @@ class PysicsInformedNeuralNetwork:
             current_lr = self.opt.param_groups[0]['lr']
             optimizer_class = type(self.opt)
             self.opt = optimizer_class(all_params, lr=current_lr)
+            self.opt.state.clear()
             if self.rank == 0:
-                print(f"  Optimizer reinitialized with {len(all_params)} parameters (net + net_1).")
+                print(f"  Optimizer reinitialized with {len(all_params)} parameters (net + net_1), state cleared.")
         else:
             if self.rank == 0:
                 print("  No active parameters found for both networks, optimizer not reinitialized.")
