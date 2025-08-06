@@ -293,27 +293,50 @@ def main():
 
             # 訓練當前階段
             start_time = time.time()
-            
+
             # 設置 Profiler
             profiler_log_dir = f"runs/profiler/{stage_name}"
             if rank == 0:
                 os.makedirs(profiler_log_dir, exist_ok=True)
-            
             do_profile = (start_epoch % 20000 == 0)
-            if do_profile:
-                with torch.profiler.profile(
-                    schedule=torch.profiler.schedule(wait=1, warmup=1, active=2, repeat=1),
-                    on_trace_ready=None,
-                    record_shapes=False,
-                    with_stack=False,
-                    profile_memory=False
-                ) as prof:
-                    PINN.train(num_epoch=epochs_to_run, lr=learning_rate, scheduler=stage_scheduler, profiler=prof, start_epoch=start_epoch)
+            class _Noop:
+                def step(self):
+                    pass
+            if stage_name == "Stage 3":
+                switch_epoch = int(num_epochs * 0.6)
+                if start_epoch < switch_epoch:
+                    run_epochs = min(epochs_to_run, switch_epoch - start_epoch)
+                    PINN.train(num_epoch=run_epochs, lr=learning_rate, scheduler=stage_scheduler, profiler=_Noop(), start_epoch=start_epoch)
+                    start_epoch += run_epochs
+                    epochs_to_run -= run_epochs
+                if epochs_to_run > 0:
+                    if not is_distributed or PINN.rank == 0:
+                        print(f"🔁 {stage_name}: 切換至 L-BFGS (後40%)")
+                    lbfgs_cfg = {
+                        'max_iter': 50,
+                        'history_size': 20,
+                        'tolerance_grad': 1e-8,
+                        'tolerance_change': 1e-9,
+                        'line_search_fn': 'strong_wolfe'
+                    }
+                    PINN.train_with_lbfgs_segment(max_outer_steps=2000, lbfgs_params=lbfgs_cfg, log_interval=200)
+                    if not is_distributed or PINN.rank == 0:
+                        print(f"✅ {stage_name}: L-BFGS 段完成，恢復 Adam")
+                remaining = num_epochs - start_epoch
+                if remaining > 0:
+                    PINN.train(num_epoch=remaining, lr=learning_rate, scheduler=None, profiler=_Noop(), start_epoch=start_epoch)
             else:
-                class _Noop:
-                    def step(self):
-                        pass
-                PINN.train(num_epoch=epochs_to_run, lr=learning_rate, scheduler=stage_scheduler, profiler=_Noop(), start_epoch=start_epoch)
+                if do_profile:
+                    with torch.profiler.profile(
+                        schedule=torch.profiler.schedule(wait=1, warmup=1, active=2, repeat=1),
+                        on_trace_ready=None,
+                        record_shapes=False,
+                        with_stack=False,
+                        profile_memory=False
+                    ) as prof:
+                        PINN.train(num_epoch=epochs_to_run, lr=learning_rate, scheduler=stage_scheduler, profiler=prof, start_epoch=start_epoch)
+                else:
+                    PINN.train(num_epoch=epochs_to_run, lr=learning_rate, scheduler=stage_scheduler, profiler=_Noop(), start_epoch=start_epoch)
 
             stage_time = time.time() - start_time
             

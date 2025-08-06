@@ -647,6 +647,74 @@ class PysicsInformedNeuralNetwork:
             self.opt.param_groups[0]['lr'] = lr
         return self.solve_Adam(self.fwd_computing_loss_2d, num_epoch, batchsize, scheduler, profiler, start_epoch)
 
+    def train_with_lbfgs_segment(self, max_outer_steps=2000, lbfgs_params=None, log_interval=200):
+         if lbfgs_params is None:
+             lbfgs_params = {
+                 'max_iter': 50,
+                 'history_size': 20,
+                 'tolerance_grad': 1e-8,
+                 'tolerance_change': 1e-9,
+                 'line_search_fn': 'strong_wolfe'
+             }
+         if self.rank == 0:
+             print("=== 進入 L-BFGS 段 ===")
+         self.opt.zero_grad(set_to_none=True)
+         params = list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters())
+         lbfgs = torch.optim.LBFGS(params,
+                                   max_iter=lbfgs_params.get('max_iter', 50),
+                                   history_size=lbfgs_params.get('history_size', 20),
+                                   tolerance_grad=lbfgs_params.get('tolerance_grad', 1e-8),
+                                   tolerance_change=lbfgs_params.get('tolerance_change', 1e-9),
+                                   line_search_fn=lbfgs_params.get('line_search_fn', 'strong_wolfe'))
+         best_loss = float('inf')
+         stagnation = 0
+         def closure():
+             lbfgs.zero_grad(set_to_none=True)
+             loss, _ = self.fwd_computing_loss_2d()
+             loss.backward()
+             return loss
+         if self.world_size > 1:
+             if self.rank == 0:
+                 for step in range(max_outer_steps):
+                     loss_val = lbfgs.step(closure).item()
+                     if step % log_interval == 0:
+                         print(f"[L-BFGS] step={step} loss={loss_val:.3e}")
+                     if loss_val + 1e-12 < best_loss:
+                         best_loss = loss_val
+                         stagnation = 0
+                     else:
+                         stagnation += 1
+                     if best_loss < 1e-8 or stagnation > 200:
+                         break
+                 net_state = {k: v.cpu() for k, v in self.get_model(self.net).state_dict().items()}
+                 net1_state = {k: v.cpu() for k, v in self.get_model(self.net_1).state_dict().items()}
+                 payload = [net_state, net1_state]
+             else:
+                 payload = [None, None]
+             dist.broadcast_object_list(payload, src=0)
+             if self.rank != 0:
+                 self.get_model(self.net).load_state_dict(payload[0], strict=True)
+                 self.get_model(self.net_1).load_state_dict(payload[1], strict=True)
+             if torch.cuda.is_available():
+                 torch.cuda.synchronize()
+         else:
+             for step in range(max_outer_steps):
+                 loss_val = lbfgs.step(closure).item()
+                 if step % log_interval == 0:
+                     print(f"[L-BFGS] step={step} loss={loss_val:.3e}")
+                 if loss_val + 1e-12 < best_loss:
+                     best_loss = loss_val
+                     stagnation = 0
+                 else:
+                     stagnation += 1
+                 if best_loss < 1e-8 or stagnation > 200:
+                     break
+         if self.rank == 0:
+             print("=== 離開 L-BFGS 段，恢復 Adam ===")
+         current_lr = self.opt.param_groups[0]['lr'] if self.opt is not None else 1e-4
+         self.opt = torch.optim.Adam(list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters()), lr=current_lr, weight_decay=0.0)
+         return best_loss
+
     def solve_Adam(self, loss_func, num_epoch=1000, batchsize=None, scheduler=None, profiler=None, start_epoch=0):
         # 啟用初始凍結
         self.freeze_evm_net(0)
