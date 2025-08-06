@@ -135,6 +135,7 @@ def main():
             eq_weight=config.physics.eq_weight,
             checkpoint_freq=config.training.checkpoint_freq
         )
+        PINN.config = config
         
         # 只在主進程顯示數據載入信息
         if rank == 0:

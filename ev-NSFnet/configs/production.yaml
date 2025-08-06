@@ -12,15 +12,17 @@ training:
   batch_size: null  # 全批次訓練
   checkpoint_freq: 10000       # 檢查點保存頻率
   training_stages:
-    - [0.05, 300000, 1e-3]   # Stage 1
-    - [0.03, 300000, 2e-4]   # Stage 2
-    - [0.01, 300000, 4e-5]   # Stage 3
-    - [0.005, 300000, 1e-5]  # Stage 4
-    - [0.002, 600000, 2e-6]  # Stage 5
+    - [0.03, 300000, 1e-3]   # Stage 1
+    - [0.01, 300000, 2e-4]   # Stage 2
+    - [0.005, 300000, 4e-5]   # Stage 3
+    - [0.002, 300000, 1e-5]  # Stage 4
+    - [0.0005, 300000, 2e-6]  # Stage 5
+    - [0.0002, 300000, 2e-6]  # Stage 5
 
 physics:
   Re: 5000
   alpha_evm: 0.03
+  beta: 1.0
   bc_weight: 10.0
   eq_weight: 1.0
 

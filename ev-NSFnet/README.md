@@ -81,12 +81,13 @@ python test.py --run_dir <RUN_DIRECTORY>
 ### 關鍵參數
 - **Reynolds數**: 3000, 5000
 - **訓練點數**: 120,000個隨機點 (完整批次訓練)
-- **總訓練輪數**: 3,000,000 epochs (分6個階段)
+- **總訓練輪數**: 1,800,000 epochs (分6個階段)
 - **學習率**: 動態調整 (1e-3 → 2e-6)
 - **權重係數**:
   - 邊界條件: 10.0
   - 方程約束: 1.0  
-  - EVM正則化: 0.05 → 0.002 (逐漸減少)
+  - EVM正則化: 0.03 → 0.0002 (逐漸減少)
+- **人工粘滯度上限**: β/Re (β=1.0，可配置)
 
 ### 靈活的學習率調度器
 
@@ -121,16 +122,26 @@ torchrun train.py --lr-scheduler CosineAnnealing
 
 ### 多階段訓練策略
 ```python
-# 6個訓練階段，每階段500,000 epochs
+# 6個訓練階段，總計1,800,000 epochs
 training_stages = [
-    (0.05, 500000, 1e-3, "Stage 1"),   # 初始大Alpha_EVM
-    (0.03, 500000, 2e-4, "Stage 2"),   # 逐漸減少
-    (0.01, 500000, 4e-5, "Stage 3"),   # 精細調整
-    (0.005, 500000, 1e-5, "Stage 4"),  # 更精細
-    (0.002, 500000, 2e-6, "Stage 5"),  # 最終調整
-    (0.002, 500000, 2e-6, "Stage 6")   # 穩定收斂
+    (0.03, 300000, 1e-3, "Stage 1"),   # 初始Alpha_EVM
+    (0.01, 300000, 2e-4, "Stage 2"),   # 逐漸減少
+    (0.005, 300000, 4e-5, "Stage 3"),  # L-BFGS混合訓練
+    (0.002, 300000, 1e-5, "Stage 4"),  # 精細調整
+    (0.0005, 300000, 2e-6, "Stage 5"), # 最終調整
+    (0.0002, 300000, 2e-6, "Stage 6")  # 穩定收斂
 ]
 ```
+
+### 🔬 L-BFGS混合優化 (Stage 3)
+- **前60%**: Adam優化器 (快速收斂)
+- **後40%**: L-BFGS優化器 (精確收斂)
+- **自動切換**: 無縫銜接兩種優化策略
+- **參數配置**:
+  - max_iter: 50
+  - history_size: 20
+  - tolerance_grad: 1e-8
+  - line_search: strong_wolfe
 
 ### 💡 完整批次訓練
 - **無批次分割**: 每個epoch使用全部120,000個訓練點
@@ -164,20 +175,29 @@ training_stages = [
 
 ### 渦流黏度模型
 ```
-νₜ = α_evm × |e|
+νₜ = min(α_evm × |e|, β/Re)
 Residual = (eq1×(u-0.5) + eq2×(v-0.5)) - e
 ```
+
+**人工粘滯度上限控制**:
+- 上限值: β/Re (β可在配置文件中調整)
+- 防止過度人工粘滯度影響物理真實性
+- 默認β=1.0，可根據Reynolds數調整
 
 ## 📁 資料結構
 
 ```
 ev-NSFnet/
+├── configs/                  # 配置文件
+│   ├── production.yaml       # 生產環境配置
+│   └── test.yaml            # 測試環境配置
 ├── data/                     # 訓練數據
 │   ├── cavity_Re3000_256_Uniform.mat
 │   └── cavity_Re5000_256_Uniform.mat
 ├── results/                  # 訓練結果 (包含各次訓練的檢查點與評估結果)
 ├── pinn_solver.py           # 核心求解器
 ├── net.py                   # 神經網路定義
+├── config.py                # 配置管理系統
 ├── train.py                 # 訓練腳本
 ├── test.py                  # 測試腳本
 ├── train.sh                 # SLURM訓練腳本
@@ -201,8 +221,21 @@ ev-NSFnet/
 ## 🛠️ 命令參考
 
 ```bash
-# 完整訓練 (3M epochs)
+```bash
+# 使用配置文件訓練
+python train.py --config configs/production.yaml
+
+# 使用測試配置
+python train.py --config configs/test.yaml
+
+# 完整訓練 (1.8M epochs)
 python train.py
+
+# 從檢查點恢復訓練
+python train.py --resume <CHECKPOINT_PATH>
+
+# 使用不同的學習率調度策略
+python train.py --lr-scheduler CosineAnnealing
 
 # 測試命令  
 python test.py

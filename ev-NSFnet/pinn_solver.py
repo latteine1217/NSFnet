@@ -107,6 +107,7 @@ class PysicsInformedNeuralNetwork:
         self.evm = None
         self.Re = Re
         self.vis_t0 = 20.0/self.Re
+        self.beta = None
 
         self.layers = layers
         self.layers_1 = layers_1
@@ -333,6 +334,10 @@ class PysicsInformedNeuralNetwork:
         total_points = (self.x_f.shape[0] if isinstance(self.x_f, torch.Tensor) else 0)
         if self.rank == 0:
             print(f"GPU {self.rank}: Processing {total_points} equation points")
+        if hasattr(self, 'config') and hasattr(self.config, 'physics') and hasattr(self.config.physics, 'beta'):
+            self.beta = float(self.config.physics.beta)
+        else:
+            self.beta = 1.0
         self.init_vis_t()
 
     def set_optimizers(self, opt):
@@ -424,7 +429,8 @@ class PysicsInformedNeuralNetwork:
         self.vis_t = self._compute_vis_t_optimized(batch_size, e)
             
         # 更新 vis_t_minus (移到GPU上避免CPU-GPU轉換)
-        self.vis_t_minus_gpu = self.alpha_evm * torch.abs(e).detach()
+        vis_t_cap = (self.beta / self.Re) if self.beta is not None else (1.0 / self.Re)
+        self.vis_t_minus_gpu = torch.minimum(self.alpha_evm * torch.abs(e).detach(), torch.full_like(e, vis_t_cap))
 
         # NS equations - 優化：避免重複的乘法運算
         vis_total = (1.0/self.Re + self.vis_t)
@@ -500,7 +506,8 @@ class PysicsInformedNeuralNetwork:
             
             # 在GPU上計算minimum
             vis_t0_tensor = torch.full_like(vis_t_minus_batch, self.vis_t0)
-            vis_t = torch.minimum(vis_t0_tensor, vis_t_minus_batch)
+            beta_cap = torch.full_like(vis_t_minus_batch, (self.beta / self.Re) if self.beta is not None else (1.0 / self.Re))
+            vis_t = torch.minimum(torch.minimum(vis_t0_tensor, vis_t_minus_batch), beta_cap)
         else:
             # 首次運行或沒有前一步數據
             vis_t = torch.full((batch_size, 1), self.vis_t0, device=self.device, dtype=torch.float32)

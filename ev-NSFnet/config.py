@@ -43,6 +43,7 @@ class PhysicsConfig:
     """物理參數配置"""
     Re: int = 5000                     # Reynolds number
     alpha_evm: float = 0.03            # 初始EVM係數
+    beta: float = 1.0                  # 人工粘滯度上限係數
     bc_weight: float = 10.0            # 邊界條件權重
     eq_weight: float = 1.0             # 方程權重
 

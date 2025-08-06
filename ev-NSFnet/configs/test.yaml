@@ -18,6 +18,7 @@ training:
 physics:
   Re: 3000
   alpha_evm: 0.03
+  beta: 1.0
   bc_weight: 20.0
   eq_weight: 1.0
 
