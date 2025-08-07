@@ -61,10 +61,8 @@ python train.py [OPTIONS]
 #                             例如: ~/NSFnet/ev-NSFnet/results/Re5000/6x80_Nf120k_lamB10_alpha0.05Stage_1/checkpoint_epoch_10000.pth
 python train.py --resume <CHECKPOINT_PATH>
 
-# 使用不同的學習率調度策略
-# --lr-scheduler <STRATEGY>: (可選) 選擇學習率調度策略。預設為 'StepLR'。
-#                            可選值: StepLR, MultiStage, CosineAnnealing, Constant
-python train.py --lr-scheduler CosineAnnealing
+# 依據配置檔 per-stage 指定 scheduler（Constant | MultiStepLR | CosineAnnealingLR）
+python train.py --config configs/production.yaml
 ```
 
 ### 測試模型
@@ -91,12 +89,7 @@ python test.py --run_dir <RUN_DIRECTORY>
 
 ### 靈活的學習率調度器
 
-您可以通過 `--lr-scheduler` 命令行參數選擇不同的學習率策略，以進行更精細的訓練調優。
-
-```bash
-# 示例：使用分階段的CosineAnnealing策略
-torchrun train.py --lr-scheduler CosineAnnealing
-```
+現改為在配置檔 per-stage 指定第四參數 scheduler：Constant、MultiStepLR、CosineAnnealingLR；Cosine 的 eta_min 預設為下一stage lr，最後一stage為 0.1×本stage lr。
 
 #### 可用策略
 
@@ -121,27 +114,22 @@ torchrun train.py --lr-scheduler CosineAnnealing
 - **實時可視化**: `tensorboard --logdir=runs`
 
 ### 多階段訓練策略
-```python
-# 6個訓練階段，總計1,800,000 epochs
-training_stages = [
-    (0.03, 300000, 1e-3, "Stage 1"),   # 初始Alpha_EVM
-    (0.01, 300000, 2e-4, "Stage 2"),   # 逐漸減少
-    (0.005, 300000, 4e-5, "Stage 3"),  # L-BFGS混合訓練
-    (0.002, 300000, 1e-5, "Stage 4"),  # 精細調整
-    (0.0005, 300000, 2e-6, "Stage 5"), # 最終調整
-    (0.0002, 300000, 2e-6, "Stage 6")  # 穩定收斂
-]
+```yaml
+training:
+  training_stages:
+    - [0.03, 300000, 1e-3, CosineAnnealingLR]
+    - [0.01, 300000, 2e-4, CosineAnnealingLR]
+    - [0.005, 300000, 4e-5, Constant]
+    - [0.002, 300000, 1e-5, CosineAnnealingLR]
+    - [0.0005, 300000, 2e-6, Constant]
+    - [0.0002, 300000, 2e-6, Constant]
 ```
 
-### 🔬 L-BFGS混合優化 (Stage 3)
-- **前60%**: Adam優化器 (快速收斂)
-- **後40%**: L-BFGS優化器 (精確收斂)
-- **自動切換**: 無縫銜接兩種優化策略
-- **參數配置**:
-  - max_iter: 50
-  - history_size: 20
-  - tolerance_grad: 1e-8
-  - line_search: strong_wolfe
+
+### 🔬 L-BFGS 精修觸發
+- 以 10k/10k 步滑窗偵測停滯：improve<1% 且非發散時觸發單段 L-BFGS 精修（不跳 stage）
+- 觸發後不 step scheduler，結束後恢復 Adam 並繼續當前 stage
+- 參數：max_outer_steps ≤ 2000；LBFGS: max_iter=50, history_size=20, tolerance_grad=1e-8, line_search=strong_wolfe
 
 ### 💡 完整批次訓練
 - **無批次分割**: 每個epoch使用全部120,000個訓練點

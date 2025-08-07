@@ -764,6 +764,16 @@ class PysicsInformedNeuralNetwork:
         # 時間估算相關變數
         estimate_frequency = 100  # 每100個epoch計算一次預估時間
         
+        # 滑窗與步數計數
+        if not hasattr(self, 'global_step'):
+            self.global_step = 0
+        self.stage_step = 0
+        from collections import deque
+        if not hasattr(self, 'stage_loss_deque') or self.stage_step == 0:
+            self.stage_loss_deque = deque(maxlen=20000)
+        if not hasattr(self, 'last_strategy_step'):
+            self.last_strategy_step = -999999
+        
         for epoch_id in range(start_epoch, num_epoch):
             # 記錄epoch開始時間
             if self.rank == 0:
@@ -851,8 +861,41 @@ class PysicsInformedNeuralNetwork:
                     self.logger.error(f"Unexpected error during optimizer step: {e}")
                     raise e
             
+            # 步數與滑窗
+            self.global_step += 1
+            self.stage_step += 1
+            self.stage_loss_deque.append(epoch_loss)
+            # Scheduler步進（L-BFGS 觸發時不在此處處理）
             if scheduler:
                 scheduler.step()
+            # 停滯檢測並觸發 L-BFGS（rank0 判斷後廣播）
+            trigger_lbfgs = False
+            if self.stage_step >= 20000 and (self.stage_step - self.last_strategy_step) >= 5000 and len(self.stage_loss_deque) >= 20000:
+                earlier = float(np.mean(list(self.stage_loss_deque)[:10000]))
+                recent = float(np.mean(list(self.stage_loss_deque)[10000:]))
+                improve = (earlier - recent) / earlier if earlier > 0 else 0.0
+                if self.rank == 0:
+                    trigger_lbfgs = (improve < 0.01) and (recent <= earlier * 1.01)
+                if self.world_size > 1:
+                    flag = [trigger_lbfgs]
+                    dist.broadcast_object_list(flag, src=0)
+                    trigger_lbfgs = flag[0]
+            if trigger_lbfgs:
+                if self.rank == 0:
+                    print(f"🔧 滑窗觸發 L-BFGS 段 (improve={improve*100:.2f}%)")
+                current_lr = self.opt.param_groups[0]['lr'] if self.opt is not None else 1e-4
+                lbfgs_cfg = {
+                    'max_iter': 50,
+                    'history_size': 20,
+                    'tolerance_grad': 1e-8,
+                    'tolerance_change': 1e-9,
+                    'line_search_fn': 'strong_wolfe'
+                }
+                self.train_with_lbfgs_segment(max_outer_steps=2000, lbfgs_params=lbfgs_cfg, log_interval=200)
+                if self.rank == 0:
+                    print("✅ 離開 L-BFGS 段，恢復 Adam")
+                self.opt = torch.optim.Adam(list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters()), lr=current_lr, weight_decay=0.0)
+                self.last_strategy_step = self.stage_step
 
             if profiler:
                 profiler.step()

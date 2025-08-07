@@ -7,17 +7,17 @@ network:
   hidden_size: 80
   hidden_size_1: 40
 
-training:
+  training:
   N_f: 120000
   batch_size: null  # 全批次訓練
   checkpoint_freq: 10000       # 檢查點保存頻率
   training_stages:
-    - [0.03, 300000, 1e-3]   # Stage 1
-    - [0.01, 300000, 2e-4]   # Stage 2
-    - [0.005, 300000, 4e-5]   # Stage 3
-    - [0.002, 300000, 1e-5]  # Stage 4
-    - [0.0005, 300000, 2e-6]  # Stage 5
-    - [0.0002, 300000, 2e-6]  # Stage 5
+    - [0.03, 300000, 1e-3, CosineAnnealingLR]   # Stage 1
+    - [0.01, 300000, 2e-4, CosineAnnealingLR]   # Stage 2
+    - [0.005, 300000, 4e-5, Constant]           # Stage 3
+    - [0.002, 300000, 1e-5, CosineAnnealingLR]  # Stage 4
+    - [0.0005, 300000, 2e-6, Constant]          # Stage 5
+    - [0.0002, 300000, 2e-6, Constant]          # Stage 6
 
 physics:
   Re: 5000

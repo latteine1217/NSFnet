@@ -21,9 +21,6 @@ def parse_args():
                        help='從檢查點恢復訓練')
     parser.add_argument('--dry-run', action='store_true',
                        help='只顯示配置不執行訓練')
-    parser.add_argument('--lr-scheduler', type=str, default='StepLR',
-                        choices=['StepLR', 'MultiStage', 'CosineAnnealing', 'Constant'],
-                        help='選擇學習率調度策略 (default: StepLR)')
     return parser.parse_args()
 
 def setup_distributed():
@@ -199,9 +196,11 @@ def main():
 
         # 使用配置中的訓練階段
         training_stages = []
-        for i, (alpha, epochs, lr) in enumerate(config.training.training_stages):
+        for i, stage in enumerate(config.training.training_stages):
+            alpha, epochs, lr = stage[0], stage[1], stage[2]
+            sched = stage[3] if len(stage) > 3 else 'Constant'
             stage_name = f"Stage {i+1}"
-            training_stages.append((alpha, epochs, lr, stage_name))
+            training_stages.append((alpha, epochs, lr, sched, stage_name))
         
         total_epochs = sum([stage[1] for stage in training_stages])
         
@@ -213,7 +212,7 @@ def main():
         # 創建optimizer
         optimizer = torch.optim.Adam(
             list(PINN.get_model_parameters(PINN.net)) + list(PINN.get_model_parameters(PINN.net_1)),
-            lr=training_stages[0][2],  # 使用第一階段的學習率
+            lr=training_stages[0][2],
             weight_decay=0.0
         )
         PINN.set_optimizers(optimizer)
@@ -236,7 +235,7 @@ def main():
         # This means if you resume in what was originally stage 2, it will still follow the
         # sequence from stage 1 as defined in the config.
         # A more advanced implementation might save and restore the stage index.
-        for stage_idx, (alpha_evm, num_epochs, learning_rate, stage_name) in enumerate(training_stages):
+        for stage_idx, (alpha_evm, num_epochs, learning_rate, sched_name, stage_name) in enumerate(training_stages):
             # Skip epochs that are already completed if resuming
             if start_epoch >= num_epochs:
                 if rank == 0:
@@ -257,39 +256,26 @@ def main():
             for param_group in PINN.opt.param_groups:
                 param_group['lr'] = learning_rate
 
-            # 根據策略決定調度器
+            # 根據策略決定調度器（由配置指定）
             stage_scheduler = None
-            if args.lr_scheduler == 'StepLR':
+            if sched_name not in ['Constant','MultiStepLR','CosineAnnealingLR']:
                 if not is_distributed or PINN.rank == 0:
-                    print("   - 啟用階段內 StepLR 調度器 (每 1/4 階段衰減至 80%)")
-                stage_scheduler = torch.optim.lr_scheduler.StepLR(PINN.opt, step_size=num_epochs//4, gamma=0.8)
-            
-            elif args.lr_scheduler == 'MultiStage':
+                    print(f"   - 未知調度器 {sched_name}，回退 Constant")
+                sched_name = 'Constant'
+            if sched_name == 'MultiStepLR':
+                import math
+                m1 = math.ceil(num_epochs/2)
+                m2 = math.ceil(4*num_epochs/5)
                 if not is_distributed or PINN.rank == 0:
-                    print("   - 使用多階段固定學習率 (無內部衰減)")
-                # 不需要調度器，保持學習率恆定
-
-            elif args.lr_scheduler == 'Constant':
-                constant_lr = training_stages[0][2]
-                if not is_distributed or PINN.rank == 0:
-                    print(f"   - 使用全局恆定學習率: {constant_lr:.2e}")
-                for param_group in PINN.opt.param_groups:
-                    param_group['lr'] = constant_lr
-
-            elif args.lr_scheduler == 'CosineAnnealing':
-                if not is_distributed or PINN.rank == 0:
-                    print(f"   - 啟用分階段 CosineAnnealing 調度器")
-
-                # 確定當前階段的最小學習率 (eta_min)
+                    print(f"   - 啟用 MultiStepLR 里程碑: {m1}, {m2}")
+                stage_scheduler = torch.optim.lr_scheduler.MultiStepLR(PINN.opt, milestones=[m1, m2], gamma=0.5)
+            elif sched_name == 'CosineAnnealingLR':
                 if stage_idx < len(training_stages) - 1:
-                    # 下一階段的起始學習率作為當前階段的終點
                     eta_min = training_stages[stage_idx + 1][2]
                 else:
-                    # 最後一個階段的終點學習率固定為 2e-6
-                    eta_min = 2e-6
-
+                    eta_min = max(learning_rate * 0.1, 1e-8)
                 if not is_distributed or PINN.rank == 0:
-                    print(f"     - {stage_name}: {num_epochs} epochs CosineAnnealing (end LR: {eta_min:.2e})")
+                    print(f"   - 啟用 CosineAnnealingLR: T_max={num_epochs}, eta_min={eta_min:.2e}")
                 stage_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(PINN.opt, T_max=num_epochs, eta_min=eta_min)
 
             # 訓練當前階段
@@ -303,7 +289,7 @@ def main():
             class _Noop:
                 def step(self):
                     pass
-            if stage_name == "Stage 3":
+            if False:  # 原先Stage 3混合優化關閉，改由滑窗觸發 L-BFGS
                 switch_epoch = int(num_epochs * 0.6)
                 if start_epoch < switch_epoch:
                     run_epochs = min(epochs_to_run, switch_epoch - start_epoch)

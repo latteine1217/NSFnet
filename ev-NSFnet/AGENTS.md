@@ -32,7 +32,7 @@
 ## Commands
 - **Train**: `python train.py --config configs/production.yaml`
 - **Train with Config**: `python train.py --config [production.yaml|test.yaml]`
-- **Train with LR Scheduler**: `python train.py --lr-scheduler [StepLR|MultiStage|CosineAnnealing|Constant]`
+- **Per-Stage Scheduler via Config**: 設定 training_stages 為 [alpha, epochs, lr, scheduler]（支援 Constant | MultiStepLR | CosineAnnealingLR）
 - **Test**: `python test.py`
 - **P100 Compatibility Test**: `python test_p100_compatibility.py` (hardware compatibility check)
 - **Single test**: No specific command - modify test.py loop ranges
@@ -54,7 +54,7 @@
 - **Neural networks**: FCNet class in net.py with configurable layers
 - **Data handling**: cavity_data.py for data loading, tools.py for utilities
 - **Distributed training**: Built-in support with fallback to single GPU
-- **Mixed optimization**: L-BFGS integration in Stage 3 for enhanced convergence
+- **Mixed optimization**: Cosine/MultiStep schedulers per-stage；滑窗停滯自動觸發 L-BFGS 精修（不跳stage）
 
 ## Key Parameters
 - Reynolds numbers: 3000, 5000
