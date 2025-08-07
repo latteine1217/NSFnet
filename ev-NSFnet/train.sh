@@ -29,5 +29,5 @@ echo "======================="
 
 echo "Job start: $(date)"
 time torchrun --nproc_per_node=2 --nnodes=1 --node_rank=0 \
-        train.py --lr-scheduler CosineAnnealing
+        train.py --config configs/production.yaml --lr-scheduler CosineAnnealing
 echo "Job end: $(date)"
