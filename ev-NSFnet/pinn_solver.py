@@ -861,28 +861,33 @@ class PysicsInformedNeuralNetwork:
                     self.logger.error(f"Unexpected error during optimizer step: {e}")
                     raise e
             
+            # Scheduler步進 - 必須在optimizer.step()之後
+            if scheduler:
+                scheduler.step()
+            
             # 步數與滑窗
             self.global_step += 1
             self.stage_step += 1
             self.stage_loss_deque.append(epoch_loss)
-            # Scheduler步進（L-BFGS 觸發時不在此處處理）
-            if scheduler:
-                scheduler.step()
-            # 停滯檢測並觸發 L-BFGS（rank0 判斷後廣播）
+            # 停滯檢測並觸發 L-BFGS（改用波動度檢測，避免分散式問題）
             trigger_lbfgs = False
-            if self.stage_step >= 20000 and (self.stage_step - self.last_strategy_step) >= 5000 and len(self.stage_loss_deque) >= 20000:
-                earlier = float(np.mean(list(self.stage_loss_deque)[:10000]))
-                recent = float(np.mean(list(self.stage_loss_deque)[10000:]))
-                improve = (earlier - recent) / earlier if earlier > 0 else 0.0
+            if (self.stage_step >= 20000 and 
+                (self.stage_step - self.last_strategy_step) >= 5000 and 
+                len(self.stage_loss_deque) >= 10000 and
+                self.world_size == 1):  # 僅在單GPU模式下使用L-BFGS
+                
+                # 使用最新10k epoch計算波動度
+                recent_10k = list(self.stage_loss_deque)[-10000:]
+                min_loss = min(recent_10k)
+                max_loss = max(recent_10k)
+                volatility = (max_loss - min_loss) / min_loss if min_loss > 0 else float('inf')
+                
                 if self.rank == 0:
-                    trigger_lbfgs = (improve < 0.01) and (recent <= earlier * 1.01)
-                if self.world_size > 1:
-                    flag = [trigger_lbfgs]
-                    dist.broadcast_object_list(flag, src=0)
-                    trigger_lbfgs = flag[0]
+                    trigger_lbfgs = volatility < 0.01  # 波動度 < 1%
+                    if trigger_lbfgs:
+                        print(f"🔧 波動度觸發 L-BFGS (volatility={volatility*100:.3f}%, min={min_loss:.2e}, max={max_loss:.2e})")
+                    
             if trigger_lbfgs:
-                if self.rank == 0:
-                    print(f"🔧 滑窗觸發 L-BFGS 段 (improve={improve*100:.2f}%)")
                 current_lr = self.opt.param_groups[0]['lr'] if self.opt is not None else 1e-4
                 lbfgs_cfg = {
                     'max_iter': 50,
