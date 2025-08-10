@@ -55,6 +55,7 @@
 - **Data handling**: cavity_data.py for data loading, tools.py for utilities
 - **Distributed training**: Built-in support with fallback to single GPU
 - **Mixed optimization**: Cosine/MultiStep schedulers per-stage；滑窗停滯自動觸發 L-BFGS 精修（不跳stage）
+- **Scheduler compatibility**: 支援freeze/unfreeze EVM網路時自動重建scheduler，確保learning rate調度正常工作
 
 ## Key Parameters
 - Reynolds numbers: 3000, 5000
@@ -64,29 +65,60 @@
 - Mixed optimization: L-BFGS integration in Stage 3 (60% Adam + 40% L-BFGS)
 - Total epochs: 1,800,000 (6 stages × 300,000 epochs)
 
-## Git 規則
+## 程式構建指引
+
+### Git 規則
 - 不要主動git
-- 在被告知要建立github repository時，建立.gitignore文件
+- 檢查是否存在.gitignore文件
+- 被告知上傳至github時先執行```git status```查看狀況
+- 上傳至github前請先更新 @README.md 文檔
 
-## markdwon檔案原則（此處不包含AGENTS.md）
+### Markdown檔案原則（此處不包含AGENTS.md）
 - README.md 中必須要標示本專案使用opencode+Github Copilot開發
+- 說明檔案請盡可能簡潔明瞭
 - 避免建立過多的markdown文件來描述專案
-- markdown文件可以多使用emoji來增加豐富度
+- markdown文件可以多使用emoji以及豐富排版來增加豐富度
 
-## 程式建構規則
-- 程式碼以邏輯清晰、精簡、易讀為主
-- 將各種獨立功能獨立成一個定義函數或是檔案
+### 程式規則
+- 程式碼以邏輯清晰、精簡、易讀、高效這四點為主
+- 將各種獨立功能獨立成一個定義函數或是api檔案，並提供api文檔
+- 各api檔案需要有獨立性，避免循環嵌套
+- 盡量避免大於3層的迴圈以免程式效率低下
 - 使用註解在功能前面簡略說明
 - 若程式有輸出需求，讓輸出能一目瞭然並使用'==='或是'---'來做分隔
 
-## 檔案參考
-重要： 當您遇到檔案參考 (例如 @rules/general.md)，請使用你的read工具，依需要載入。它們與當前的 SPECIFIC 任務相關。
+## Learning Rate Scheduler 修復記錄
+### 問題描述
+- **原始問題**: CosineAnnealingLR和MultiStepLR scheduler在訓練過程中學習率保持不變
+- **根本原因**: EVM網路的freeze/unfreeze機制（每10000個epoch）重建optimizer，但scheduler仍綁定到舊的optimizer實例
+- **影響**: 所有需要動態學習率的訓練策略失效，導致訓練效果不佳
 
-### 說明：
+### 修復方案 (2025-01-11)
+- **核心修復**: 在`pinn_solver.py`中實現scheduler自動重建機制
+- **修改位置**:
+  1. `solve_Adam()`: 存储scheduler參數以便重建
+  2. `_rebuild_scheduler()`: 新增方法重建CosineAnnealingLR和MultiStepLR
+  3. `freeze_evm_net()`: optimizer重建後自動重建scheduler
+  4. `defreeze_evm_net()`: optimizer重建後自動重建scheduler  
+  5. `train_with_lbfgs_segment()`: L-BFGS結束後自動重建scheduler
 
-- 請勿預先載入所有參考資料 - 根據實際需要使用懶惰載入。
-- 載入時，將內容視為覆寫預設值的強制指示
-- 需要時，以遞迴方式跟蹤參照
+### 技術細節
+- **參數保持**: 保存scheduler的`T_max`, `eta_min`, `milestones`, `gamma`, `last_epoch`等關鍵參數
+- **狀態延續**: 重建時保持scheduler的訓練狀態（`last_epoch`）
+- **initial_lr修復**: 確保新optimizer包含`initial_lr`參數防止PyTorch報錯
+- **智能切換**: 訓練循環優先使用重建後的scheduler
+
+### 驗證結果
+- ✅ CosineAnnealingLR正確按餘弦曲線調整學習率
+- ✅ MultiStepLR在指定milestone正確降低學習率  
+- ✅ freeze/unfreeze操作後scheduler狀態正確保持
+- ✅ TensorBoard能正確顯示學習率變化曲線
+
+### 使用建議
+- 配置文件中可安全使用所有scheduler類型：`Constant`, `MultiStepLR`, `CosineAnnealingLR`
+- 推薦使用`CosineAnnealingLR`獲得更平滑的學習率衰減
+- 修復後無需額外配置，所有現有配置文件自動生效
+
 ## 開發者指引 👨‍💻
 
 ### 🎯 角色扮演準則
@@ -95,6 +127,7 @@
 > - ⚡ **效能導向**
 > - 🧪 **測試驅動**: 重視程式碼品質，推崇文檔覆蓋
 > - 🔄 **現代化架構**
+
 仔細思考，只執行我給你的具體任務，用最簡潔優雅的解決方案，盡可能少的修改程式碼
 
 ### 📋 任務執行流程
@@ -112,31 +145,10 @@
 - **🔄 懶惰載入**: 按需載入參考資料，避免預先載入所有檔案
 - **💬 回應方式**: 優先提供計畫和建議，除非用戶明確要求立即實作
 
+## 檔案參考
+重要： 當您遇到檔案參考 (例如 @rules/general.md)，請使用你的read工具，依需要載入。它們與當前的 SPECIFIC 任務相關。
 
-## 程式構建指引
-### Git 規則
-- 不要主動git
-- 檢查是否存在.gitignore文件
-- 被告知上傳至github時先執行```git status```查看狀況
-- 上傳至github前請先更新 @README.md 文檔
-
-
-### markdwon檔案原則（此處不包含AGENTS.md）
-- README.md 中必須要標示本專案使用opencode+Github Copilot開發
-- 說明檔案請盡可能簡潔明瞭
-- 避免建立過多的markdown文件來描述專案
-- markdown文件可以多使用emoji以及豐富排版來增加豐富度
-
-### 程式規則
-- 程式碼以邏輯清晰、精簡、易讀、高效這四點為主
-- 將各種獨立功能獨立成一個定義函數或是api檔案，並提供api文檔
-- 各api檔案需要有獨立性，避免循環嵌套
-- 盡量避免大於3層的迴圈以免程式效率低下
-- 使用註解在功能前面簡略說明
-- 若程式有輸出需求，讓輸出能一目瞭然並使用'==='或是'---'來做分隔
-
-## 說明：
-
-- 請勿預先載入所有參考資料 - 根據實際需要使用懶惰載入。
+### 說明：
+- 請勿預先載入所有參考資料 - 根據實際需要使用懶惰載入
 - 載入時，將內容視為覆寫預設值的強制指示
 - 需要時，以遞迴方式跟蹤參照
