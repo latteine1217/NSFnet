@@ -17,6 +17,20 @@ class NetworkConfig:
     hidden_size_1: int = 40            # EVM網路神經元數
 
 @dataclass
+class LBFGSConfig:
+    """L-BFGS優化器配置"""
+    enabled_in_distributed: bool = True    # 分佈式模式下啟用L-BFGS
+    volatility_threshold: float = 0.01     # 波動度閾值
+    max_outer_steps: int = 2000            # 最大外循環步數
+    timeout_seconds: int = 600             # 執行超時(秒)
+    max_iter: int = 50                     # L-BFGS內部迭代數
+    history_size: int = 20                 # 歷史大小
+    tolerance_grad: float = 1e-8           # 梯度容差
+    tolerance_change: float = 1e-9         # 變化容差
+    line_search_fn: str = "strong_wolfe"   # 線搜索方法
+    checkpoint_before_lbfgs: bool = True   # L-BFGS前自動保存
+
+@dataclass
 class TrainingConfig:
     """訓練參數配置"""
     N_f: int = 120000                  # 方程點數量
@@ -25,6 +39,9 @@ class TrainingConfig:
     
     # 訓練階段配置 (alpha_evm, epochs, learning_rate[, scheduler])
     training_stages: List = None
+    
+    # L-BFGS配置
+    lbfgs: LBFGSConfig = None
     
     def __post_init__(self):
         if self.training_stages is None:
@@ -37,6 +54,8 @@ class TrainingConfig:
                 (0.002, 350000, 2e-6),   # Stage 5
                 (0.002, 350000, 2e-6)   # Stage 6
             ]
+        if self.lbfgs is None:
+            self.lbfgs = LBFGSConfig()
 
 @dataclass
 class PhysicsConfig:
@@ -124,7 +143,16 @@ class ConfigManager:
         if 'network' in config_dict:
             self.config.network = NetworkConfig(**config_dict['network'])
         if 'training' in config_dict:
-            self.config.training = TrainingConfig(**config_dict['training'])
+            training_config = config_dict['training'].copy()
+            
+            # 處理L-BFGS配置
+            if 'lbfgs' in training_config:
+                lbfgs_config = LBFGSConfig(**training_config['lbfgs'])
+                training_config.pop('lbfgs')
+                self.config.training = TrainingConfig(**training_config)
+                self.config.training.lbfgs = lbfgs_config
+            else:
+                self.config.training = TrainingConfig(**training_config)
         if 'physics' in config_dict:
             self.config.physics = PhysicsConfig(**config_dict['physics'])
         if 'system' in config_dict:

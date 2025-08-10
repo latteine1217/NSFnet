@@ -12,12 +12,25 @@ training:
   batch_size: null  # 全批次訓練
   checkpoint_freq: 10000       # 檢查點保存頻率
   training_stages:
-    - [0.03, 300000, 1e-3, CosineAnnealingLR]   # Stage 1
-    - [0.01, 300000, 2e-4, CosineAnnealingLR]   # Stage 2
-    - [0.005, 300000, 4e-5, Constant]           # Stage 3
-    - [0.002, 300000, 1e-5, CosineAnnealingLR]  # Stage 4
-    - [0.0005, 300000, 2e-6, Constant]          # Stage 5
-    - [0.0002, 300000, 2e-6, Constant]          # Stage 6
+    - [0.03, 200000, 1e-3, Constant]            # Stage 1
+    - [0.01, 200000, 2e-4, CosineAnnealingLR]   # Stage 2
+    - [0.005, 200000, 4e-5, CosineAnnealingLR]  # Stage 3
+    - [0.001, 200000, 1e-5, CosineAnnealingLR]  # Stage 4
+    - [0.0002, 200000, 2e-6, Constant]          # Stage 5
+    - [0.00004, 200000, 2e-6, Constant]          # Stage 6
+  
+  # L-BFGS相關配置
+  lbfgs:
+    enabled_in_distributed: true      # 啟用分佈式L-BFGS
+    volatility_threshold: 0.01        # 波動度閾值 (1%)
+    max_outer_steps: 2000             # 最大外循環步數
+    timeout_seconds: 600              # 執行超時 (10分鐘)
+    max_iter: 50                      # L-BFGS內部迭代數
+    history_size: 20                  # 歷史大小
+    tolerance_grad: 1e-8              # 梯度容差
+    tolerance_change: 1e-9            # 變化容差
+    line_search_fn: "strong_wolfe"    # 線搜索方法
+    checkpoint_before_lbfgs: true     # L-BFGS前自動保存
 
 physics:
   Re: 5000

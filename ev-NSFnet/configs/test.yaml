@@ -14,6 +14,19 @@ training:
   training_stages:
     - [0.05, 10, 0.001]    # Stage 1: 10 epochs
     - [0.03, 10, 0.0005]   # Stage 2: 10 epochs
+  
+  # L-BFGS相關配置
+  lbfgs:
+    enabled_in_distributed: true      # 啟用分佈式L-BFGS
+    volatility_threshold: 0.05        # 放寬波動度閾值用於測試
+    max_outer_steps: 50               # 減少步數用於測試
+    timeout_seconds: 120              # 2分鐘超時
+    max_iter: 10                      # 減少內部迭代
+    history_size: 5                   # 減少歷史大小
+    tolerance_grad: 1e-6              # 放寬梯度容差
+    tolerance_change: 1e-7            # 放寬變化容差
+    line_search_fn: "strong_wolfe"    # 線搜索方法
+    checkpoint_before_lbfgs: true     # L-BFGS前自動保存
 
 physics:
   Re: 3000

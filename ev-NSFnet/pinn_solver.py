@@ -654,75 +654,269 @@ class PysicsInformedNeuralNetwork:
             self.opt.param_groups[0]['lr'] = lr
         return self.solve_Adam(self.fwd_computing_loss_2d, num_epoch, batchsize, scheduler, profiler, start_epoch)
 
-    def train_with_lbfgs_segment(self, max_outer_steps=2000, lbfgs_params=None, log_interval=200):
-         if lbfgs_params is None:
-             lbfgs_params = {
-                 'max_iter': 50,
-                 'history_size': 20,
-                 'tolerance_grad': 1e-8,
-                 'tolerance_change': 1e-9,
-                 'line_search_fn': 'strong_wolfe'
-             }
-         if self.rank == 0:
-             print("=== 進入 L-BFGS 段 ===")
-         self.opt.zero_grad(set_to_none=True)
-         params = list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters())
-         lbfgs = torch.optim.LBFGS(params,
-                                   max_iter=lbfgs_params.get('max_iter', 50),
-                                   history_size=lbfgs_params.get('history_size', 20),
-                                   tolerance_grad=lbfgs_params.get('tolerance_grad', 1e-8),
-                                   tolerance_change=lbfgs_params.get('tolerance_change', 1e-9),
-                                   line_search_fn=lbfgs_params.get('line_search_fn', 'strong_wolfe'))
-         best_loss = float('inf')
-         stagnation = 0
-         def closure():
-             lbfgs.zero_grad(set_to_none=True)
-             loss, _ = self.fwd_computing_loss_2d()
-             loss.backward()
-             return loss
-         if self.world_size > 1:
-             if self.rank == 0:
-                 for step in range(max_outer_steps):
-                     loss_val = lbfgs.step(closure).item()
-                     if step % log_interval == 0:
-                         print(f"[L-BFGS] step={step} loss={loss_val:.3e}")
-                     if loss_val + 1e-12 < best_loss:
-                         best_loss = loss_val
-                         stagnation = 0
-                     else:
-                         stagnation += 1
-                     if best_loss < 1e-8 or stagnation > 200:
-                         break
-                 net_state = {k: v.cpu() for k, v in self.get_model(self.net).state_dict().items()}
-                 net1_state = {k: v.cpu() for k, v in self.get_model(self.net_1).state_dict().items()}
-                 payload = [net_state, net1_state]
-             else:
-                 payload = [None, None]
-             dist.broadcast_object_list(payload, src=0)
-             if self.rank != 0:
-                 self.get_model(self.net).load_state_dict(payload[0], strict=True)
-                 self.get_model(self.net_1).load_state_dict(payload[1], strict=True)
-             if torch.cuda.is_available():
-                 torch.cuda.synchronize()
-         else:
-             for step in range(max_outer_steps):
-                 loss_val = lbfgs.step(closure).item()
-                 if step % log_interval == 0:
-                     print(f"[L-BFGS] step={step} loss={loss_val:.3e}")
-                 if loss_val + 1e-12 < best_loss:
-                     best_loss = loss_val
-                     stagnation = 0
-                 else:
-                     stagnation += 1
-                 if best_loss < 1e-8 or stagnation > 200:
-                     break
-         if self.rank == 0:
-             print("=== 離開 L-BFGS 段，恢復 Adam ===")
-         current_lr = self.opt.param_groups[0]['lr'] if self.opt is not None else 1e-4
-         self.opt = torch.optim.Adam(list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters()), lr=current_lr, weight_decay=0.0)
-         return best_loss
+    def _check_distributed_lbfgs_trigger(self):
+        """分佈式L-BFGS觸發檢測"""
+        trigger_lbfgs = False
+        
+        # 檢查是否啟用分佈式L-BFGS
+        lbfgs_config = getattr(self, 'config', None)
+        if lbfgs_config and hasattr(lbfgs_config.training, 'lbfgs'):
+            if not lbfgs_config.training.lbfgs.enabled_in_distributed and self.world_size > 1:
+                return False  # 分佈式模式下禁用L-BFGS
+        
+        # 檢查基本條件
+        if (self.stage_step >= 20000 and 
+            (self.stage_step - self.last_strategy_step) >= 5000 and 
+            len(self.stage_loss_deque) >= 10000):
+            
+            # rank 0計算波動度並做決定
+            if self.rank == 0:
+                recent_10k = list(self.stage_loss_deque)[-10000:]
+                min_loss = min(recent_10k)
+                max_loss = max(recent_10k)
+                volatility = (max_loss - min_loss) / min_loss if min_loss > 0 else float('inf')
+                
+                # 從配置獲取波動度閾值
+                if lbfgs_config and hasattr(lbfgs_config.training, 'lbfgs'):
+                    volatility_threshold = lbfgs_config.training.lbfgs.volatility_threshold
+                else:
+                    volatility_threshold = 0.01  # 默認1%
+                    
+                trigger_lbfgs = volatility < volatility_threshold
+                
+                if trigger_lbfgs:
+                    mode = "分佈式" if self.world_size > 1 else "單GPU"
+                    print(f"🔧 波動度觸發{mode} L-BFGS (volatility={volatility*100:.3f}%, min={min_loss:.2e}, max={max_loss:.2e})")
+            
+            # 分佈式模式下廣播觸發決定
+            if self.world_size > 1:
+                try:
+                    trigger_data = [trigger_lbfgs]
+                    dist.broadcast_object_list(trigger_data, src=0)
+                    trigger_lbfgs = trigger_data[0]
+                except Exception as e:
+                    if self.rank == 0:
+                        print(f"🚨 L-BFGS觸發廣播失敗: {e}")
+                    trigger_lbfgs = False
+                    
+        return trigger_lbfgs
+
+    def _calculate_parameter_checksum(self, net_state, net1_state):
+        """計算參數校驗碼"""
+        checksum = 0.0
+        for state_dict in [net_state, net1_state]:
+            for param in state_dict.values():
+                checksum += torch.sum(param).item()
+        return checksum
+
+    def _broadcast_model_parameters_with_verification(self):
+        """參數廣播並驗證一致性"""
+        if self.world_size <= 1:
+            return True
+            
+        try:
+            if self.rank == 0:
+                # 準備參數數據並計算校驗碼
+                net_state = {k: v.cpu() for k, v in self.get_model(self.net).state_dict().items()}
+                net1_state = {k: v.cpu() for k, v in self.get_model(self.net_1).state_dict().items()}
+                
+                # 計算參數校驗碼
+                checksum = self._calculate_parameter_checksum(net_state, net1_state)
+                payload = [net_state, net1_state, checksum]
+            else:
+                payload = [None, None, None]
+            
+            # 廣播參數
+            dist.broadcast_object_list(payload, src=0)
+            
+            # 非master rank載入參數並驗證
+            if self.rank != 0:
+                self.get_model(self.net).load_state_dict(payload[0], strict=True)
+                self.get_model(self.net_1).load_state_dict(payload[1], strict=True)
+                
+                # 驗證參數校驗碼
+                local_checksum = self._calculate_parameter_checksum(payload[0], payload[1])
+                if abs(local_checksum - payload[2]) > 1e-10:
+                    raise RuntimeError(f"Rank {self.rank}: 參數校驗失敗 (local={local_checksum:.6e}, expected={payload[2]:.6e})")
+            
+            # GPU同步
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            
+            return True
+            
+        except Exception as e:
+            if self.rank == 0:
+                print(f"🚨 參數同步失敗: {e}")
+            return False
+
+    def train_with_lbfgs_segment(self, max_outer_steps=None, lbfgs_params=None, log_interval=200, timeout_seconds=None):
+        """增強版分佈式L-BFGS訓練段"""
+        import copy
+        
+        # 從配置中獲取參數
+        lbfgs_config = getattr(self, 'config', None)
+        if lbfgs_config and hasattr(lbfgs_config.training, 'lbfgs'):
+            config_lbfgs = lbfgs_config.training.lbfgs
+            if max_outer_steps is None:
+                max_outer_steps = config_lbfgs.max_outer_steps
+            if timeout_seconds is None:
+                timeout_seconds = config_lbfgs.timeout_seconds
+            if lbfgs_params is None:
+                lbfgs_params = {
+                    'max_iter': config_lbfgs.max_iter,
+                    'history_size': config_lbfgs.history_size,
+                    'tolerance_grad': config_lbfgs.tolerance_grad,
+                    'tolerance_change': config_lbfgs.tolerance_change,
+                    'line_search_fn': config_lbfgs.line_search_fn
+                }
+        
+        # 使用默認值如果沒有配置
+        if max_outer_steps is None:
+            max_outer_steps = 2000
+        if timeout_seconds is None:
+            timeout_seconds = 600
+        if lbfgs_params is None:
+            lbfgs_params = {
+                'max_iter': 50,
+                'history_size': 20,
+                'tolerance_grad': 1e-8,
+                'tolerance_change': 1e-9,
+                'line_search_fn': 'strong_wolfe'
+            }
+        
+        mode = "分佈式" if self.world_size > 1 else "單GPU"
+        if self.rank == 0:
+            print(f"=== 進入 {mode} L-BFGS 段 ===")
+        
+        # 保存當前Adam狀態
+        adam_state_backup = None
+        if self.opt is not None:
+            try:
+                adam_state_backup = copy.deepcopy(self.opt.state_dict())
+            except:
+                pass
+        
+        success = False
+        best_loss = float('inf')
+        
+        try:
+            self.opt.zero_grad(set_to_none=True)
+            params = list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters())
+            lbfgs = torch.optim.LBFGS(params,
+                                      max_iter=lbfgs_params.get('max_iter', 50),
+                                      history_size=lbfgs_params.get('history_size', 20),
+                                      tolerance_grad=lbfgs_params.get('tolerance_grad', 1e-8),
+                                      tolerance_change=lbfgs_params.get('tolerance_change', 1e-9),
+                                      line_search_fn=lbfgs_params.get('line_search_fn', 'strong_wolfe'))
+            
+            stagnation = 0
+            
+            def closure():
+                lbfgs.zero_grad(set_to_none=True)
+                loss, _ = self.fwd_computing_loss_2d()
+                loss.backward()
+                return loss
+            
+            if self.world_size > 1:
+                # 分佈式模式：僅rank 0執行L-BFGS
+                if self.rank == 0:
+                    for step in range(max_outer_steps):
+                        try:
+                            loss_val = lbfgs.step(closure).item()
+                            if step % log_interval == 0:
+                                print(f"[分佈式 L-BFGS] step={step} loss={loss_val:.3e}")
+                            
+                            if loss_val + 1e-12 < best_loss:
+                                best_loss = loss_val
+                                stagnation = 0
+                            else:
+                                stagnation += 1
+                            
+                            if best_loss < 1e-8 or stagnation > 200:
+                                break
+                        except Exception as e:
+                            print(f"🚨 L-BFGS步驟失敗 (step={step}): {e}")
+                            break
+                
+                # 使用增強的參數同步機制
+                sync_success = self._broadcast_model_parameters_with_verification()
+                if not sync_success:
+                    raise RuntimeError("參數同步失敗")
+                
+                success = True
+                
+            else:
+                # 單GPU模式
+                for step in range(max_outer_steps):
+                    try:
+                        loss_val = lbfgs.step(closure).item()
+                        if step % log_interval == 0:
+                            print(f"[L-BFGS] step={step} loss={loss_val:.3e}")
+                        
+                        if loss_val + 1e-12 < best_loss:
+                            best_loss = loss_val
+                            stagnation = 0
+                        else:
+                            stagnation += 1
+                        
+                        if best_loss < 1e-8 or stagnation > 200:
+                            break
+                    except Exception as e:
+                        if self.rank == 0:
+                            print(f"🚨 L-BFGS步驟失敗 (step={step}): {e}")
+                        break
+                
+                success = True
+                
+        except Exception as e:
+            if self.rank == 0:
+                print(f"🚨 L-BFGS執行失敗: {e}")
+            success = False
+        
+        # 恢復Adam優化器
+        current_lr = self.opt.param_groups[0]['lr'] if self.opt is not None else 1e-4
+        self.opt = torch.optim.Adam(list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters()), 
+                                   lr=current_lr, weight_decay=0.0)
+        
+        # 确保有initial_lr参数
+        for group in self.opt.param_groups:
+            group['initial_lr'] = current_lr
+        
+        # 重建scheduler以绑定新的optimizer
+        self._rebuild_scheduler()
+        
+        # 如果L-BFGS失敗且有備份，嘗試恢復Adam狀態
+        if adam_state_backup is not None and not success:
+            try:
+                self.opt.load_state_dict(adam_state_backup)
+                if self.rank == 0:
+                    print("🔄 已恢復Adam優化器狀態")
+            except Exception as e:
+                if self.rank == 0:
+                    print(f"⚠️ 恢復Adam狀態失敗: {e}")
+        
+        if self.rank == 0:
+            status = "成功" if success else "失敗，已回退"
+            print(f"=== 離開 {mode} L-BFGS 段 ({status}) ===")
+        
+        return best_loss
 
     def solve_Adam(self, loss_func, num_epoch=1000, batchsize=None, scheduler=None, profiler=None, start_epoch=0):
+        # 存储当前scheduler以便在optimizer重建时使用
+        self.current_scheduler = scheduler
+        self.current_scheduler_params = None
+        if scheduler is not None:
+            # 存储scheduler的类型和参数以便重建
+            self.current_scheduler_params = {
+                'class': type(scheduler),
+                'T_max': getattr(scheduler, 'T_max', None),
+                'eta_min': getattr(scheduler, 'eta_min', None),
+                'milestones': getattr(scheduler, 'milestones', None),
+                'gamma': getattr(scheduler, 'gamma', None),
+                'last_epoch': scheduler.last_epoch
+            }
+        
         # 啟用初始凍結
         self.freeze_evm_net(0)
         
@@ -862,31 +1056,20 @@ class PysicsInformedNeuralNetwork:
                     raise e
             
             # Scheduler步進 - 必須在optimizer.step()之後
-            if scheduler:
-                scheduler.step()
+            # 使用存储的scheduler，以防原始scheduler失效
+            active_scheduler = self.current_scheduler if self.current_scheduler is not None else scheduler
+            if active_scheduler:
+                active_scheduler.step()
+                # 更新last_epoch参数以保持状态同步
+                if self.current_scheduler_params is not None:
+                    self.current_scheduler_params['last_epoch'] = active_scheduler.last_epoch
             
             # 步數與滑窗
             self.global_step += 1
             self.stage_step += 1
             self.stage_loss_deque.append(epoch_loss)
-            # 停滯檢測並觸發 L-BFGS（改用波動度檢測，避免分散式問題）
-            trigger_lbfgs = False
-            if (self.stage_step >= 20000 and 
-                (self.stage_step - self.last_strategy_step) >= 5000 and 
-                len(self.stage_loss_deque) >= 10000 and
-                self.world_size == 1):  # 僅在單GPU模式下使用L-BFGS
-                
-                # 使用最新10k epoch計算波動度
-                recent_10k = list(self.stage_loss_deque)[-10000:]
-                min_loss = min(recent_10k)
-                max_loss = max(recent_10k)
-                volatility = (max_loss - min_loss) / min_loss if min_loss > 0 else float('inf')
-                
-                if self.rank == 0:
-                    trigger_lbfgs = volatility < 0.01  # 波動度 < 1%
-                    if trigger_lbfgs:
-                        print(f"🔧 波動度觸發 L-BFGS (volatility={volatility*100:.3f}%, min={min_loss:.2e}, max={max_loss:.2e})")
-                    
+            # 分佈式L-BFGS觸發檢測
+            trigger_lbfgs = self._check_distributed_lbfgs_trigger()
             if trigger_lbfgs:
                 current_lr = self.opt.param_groups[0]['lr'] if self.opt is not None else 1e-4
                 lbfgs_cfg = {
@@ -900,6 +1083,14 @@ class PysicsInformedNeuralNetwork:
                 if self.rank == 0:
                     print("✅ 離開 L-BFGS 段，恢復 Adam")
                 self.opt = torch.optim.Adam(list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters()), lr=current_lr, weight_decay=0.0)
+                
+                # 确保有initial_lr参数
+                for group in self.opt.param_groups:
+                    group['initial_lr'] = current_lr
+                
+                # 重建scheduler以绑定新的optimizer
+                self._rebuild_scheduler()
+                
                 self.last_strategy_step = self.stage_step
 
             if profiler:
@@ -984,6 +1175,14 @@ class PysicsInformedNeuralNetwork:
             optimizer_class = type(self.opt)
             self.opt = optimizer_class(active_params, lr=current_lr)
             self.opt.state.clear()
+            
+            # 确保有initial_lr参数
+            for group in self.opt.param_groups:
+                group['initial_lr'] = current_lr
+            
+            # 重建scheduler以绑定新的optimizer
+            self._rebuild_scheduler()
+            
             if self.rank == 0:
                 print(f"  Optimizer reinitialized with {len(active_params)} parameters (net only), state cleared.")
         else:
@@ -1016,6 +1215,14 @@ class PysicsInformedNeuralNetwork:
             optimizer_class = type(self.opt)
             self.opt = optimizer_class(all_params, lr=current_lr)
             self.opt.state.clear()
+            
+            # 确保有initial_lr参数
+            for group in self.opt.param_groups:
+                group['initial_lr'] = current_lr
+            
+            # 重建scheduler以绑定新的optimizer
+            self._rebuild_scheduler()
+            
             if self.rank == 0:
                 print(f"  Optimizer reinitialized with {len(all_params)} parameters (net + net_1), state cleared.")
         else:
@@ -1024,6 +1231,45 @@ class PysicsInformedNeuralNetwork:
         
         if self.rank == 0:
             print(f"  Active parameters: {len(all_params)} (net + net_1)")
+
+    def _rebuild_scheduler(self):
+        """重建scheduler以绑定新的optimizer"""
+        if self.current_scheduler is None or self.current_scheduler_params is None:
+            return
+            
+        try:
+            # 确保optimizer参数组有initial_lr
+            for group in self.opt.param_groups:
+                if 'initial_lr' not in group:
+                    group['initial_lr'] = group['lr']
+            
+            scheduler_class = self.current_scheduler_params['class']
+            
+            if scheduler_class.__name__ == 'CosineAnnealingLR':
+                self.current_scheduler = scheduler_class(
+                    self.opt, 
+                    T_max=self.current_scheduler_params['T_max'],
+                    eta_min=self.current_scheduler_params['eta_min'],
+                    last_epoch=self.current_scheduler_params['last_epoch']
+                )
+            elif scheduler_class.__name__ == 'MultiStepLR':
+                self.current_scheduler = scheduler_class(
+                    self.opt,
+                    milestones=self.current_scheduler_params['milestones'],
+                    gamma=self.current_scheduler_params['gamma'],
+                    last_epoch=self.current_scheduler_params['last_epoch']
+                )
+            else:
+                # 对于其他类型的scheduler，尝试通用重建
+                self.current_scheduler = scheduler_class(self.opt)
+                
+            if self.rank == 0:
+                print(f"  Scheduler rebuilt: {scheduler_class.__name__}")
+                
+        except Exception as e:
+            if self.rank == 0:
+                print(f"  Warning: Failed to rebuild scheduler: {e}")
+            self.current_scheduler = None
 
     def safe_tensorboard_log(self, tag, value, global_step):
         """安全的TensorBoard記錄函數with錯誤處理"""

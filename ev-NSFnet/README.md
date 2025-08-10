@@ -87,9 +87,12 @@ python test.py --run_dir <RUN_DIRECTORY>
   - EVM正則化: 0.03 → 0.0002 (逐漸減少)
 - **人工粘滯度上限**: β/Re (β=1.0，可配置)
 
-### 靈活的學習率調度器
+### 靈活的學習率調度器 🔧
 
 現改為在配置檔 per-stage 指定第四參數 scheduler：Constant、MultiStepLR、CosineAnnealingLR；Cosine 的 eta_min 預設為下一stage lr，最後一stage為 0.1×本stage lr。
+
+#### ✅ Scheduler修復 (2025-01-11)
+**修復問題**: 解決了CosineAnnealingLR和MultiStepLR在EVM網路freeze/unfreeze時失效的問題。現在所有scheduler都能正常工作，learning rate會按預期變化並在TensorBoard中正確顯示。
 
 #### 可用策略
 
@@ -109,7 +112,7 @@ python test.py --run_dir <RUN_DIRECTORY>
 
 ### 📊 TensorBoard集成
 - **損失追蹤**: 總損失、方程損失、邊界損失
-- **系統監控**: GPU記憶體使用、學習率變化
+- **系統監控**: GPU記憶體使用、學習率變化 (✅ 已修復scheduler問題)
 - **訓練效率**: 每epoch時間、Alpha_EVM參數變化
 - **實時可視化**: `tensorboard --logdir=runs`
 
@@ -206,6 +209,43 @@ ev-NSFnet/
 - 包含主網路、EVM網路權重、優化器狀態及訓練進度
 - 儲存路徑: `~/NSFnet/ev-NSFnet/results/Re{Re}/{layers}x{hidden_size}_Nf{N_f/1000}k_lamB{bc_weight}_alpha{alpha_evm}{Stage_Name}/`
 
+## 🔧 技術改進記錄
+
+### Learning Rate Scheduler 修復 (2025-01-11)
+
+#### 🐛 問題描述
+- **症狀**: CosineAnnealingLR和MultiStepLR配置正確但學習率在TensorBoard中顯示為常數
+- **原因**: EVM網路每10000個epoch的freeze/unfreeze操作重建optimizer，但scheduler仍綁定舊實例
+- **影響**: 動態學習率策略完全失效，影響訓練收斂效果
+
+#### ✅ 解決方案
+- **核心修復**: 實現scheduler自動重建機制，在optimizer重建時同步重建scheduler
+- **修改模組**: `pinn_solver.py` - 新增`_rebuild_scheduler()`方法
+- **修復範圍**: 
+  - ✅ freeze/unfreeze EVM網路時
+  - ✅ L-BFGS優化結束時  
+  - ✅ 任何optimizer重建場景
+- **狀態保持**: 完整保存並恢復scheduler的訓練狀態（`last_epoch`等）
+
+#### 🎯 驗證結果
+- ✅ CosineAnnealingLR按餘弦曲線正確調整學習率
+- ✅ MultiStepLR在milestone處正確階躍降低
+- ✅ TensorBoard正確顯示學習率變化曲線
+- ✅ 所有現有配置文件無需修改即可生效
+
+#### 📋 使用建議  
+```yaml
+training:
+  training_stages:
+    - [0.03, 300000, 1e-3, CosineAnnealingLR]   # ✅ 現在正常工作
+    - [0.01, 300000, 2e-4, MultiStepLR]        # ✅ 現在正常工作
+    - [0.005, 300000, 4e-5, Constant]           # ✅ 一直正常工作
+```
+
+推薦使用`CosineAnnealingLR`以獲得更平滑和有效的學習率衰減策略。
+
+---
+
 ## 🛠️ 命令參考
 
 ```bash
@@ -264,7 +304,7 @@ tensorboard --logdir=runs --host=0.0.0.0 --port=6006
   title={Physics-Informed Neural Networks for NSFnet: Cavity Flow Simulation},
   author={Your Name},
   year={2025},
-  note={Developed with opencode and GitHub Copilot}
+  note={Developed with opencode and GitHub Copilot. Includes scheduler compatibility fixes for distributed training.}
 }
 ```
 
