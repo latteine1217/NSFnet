@@ -1276,7 +1276,7 @@ class PysicsInformedNeuralNetwork:
             print(f"  Active parameters: {len(all_params)} (net + net_1)")
 
     def _rebuild_scheduler(self):
-        """重建scheduler以绑定新的optimizer"""
+        """重建scheduler以绑定新的optimizer，確保學習率連續性"""
         if self.current_scheduler is None or self.current_scheduler_params is None:
             return
             
@@ -1288,26 +1288,30 @@ class PysicsInformedNeuralNetwork:
             
             scheduler_class = self.current_scheduler_params['class']
             
+            # 關鍵修復：使用全局步數而非保存的last_epoch
+            # 這確保了freeze/unfreeze後學習率調度的連續性
+            global_epoch = self.global_step  # 使用全局步數
+            
             if scheduler_class.__name__ == 'CosineAnnealingLR':
                 self.current_scheduler = scheduler_class(
                     self.opt, 
                     T_max=self.current_scheduler_params['T_max'],
                     eta_min=self.current_scheduler_params['eta_min'],
-                    last_epoch=self.current_scheduler_params['last_epoch']
+                    last_epoch=global_epoch  # 使用全局步數保持連續性
                 )
             elif scheduler_class.__name__ == 'MultiStepLR':
                 self.current_scheduler = scheduler_class(
                     self.opt,
                     milestones=self.current_scheduler_params['milestones'],
                     gamma=self.current_scheduler_params['gamma'],
-                    last_epoch=self.current_scheduler_params['last_epoch']
+                    last_epoch=global_epoch  # 使用全局步數保持連續性
                 )
             else:
                 # 对于其他类型的scheduler，尝试通用重建
                 self.current_scheduler = scheduler_class(self.opt)
                 
             if self.rank == 0:
-                print(f"  Scheduler rebuilt: {scheduler_class.__name__}")
+                print(f"  Scheduler rebuilt: {scheduler_class.__name__} (global_step={global_epoch})")
                 
         except Exception as e:
             if self.rank == 0:
