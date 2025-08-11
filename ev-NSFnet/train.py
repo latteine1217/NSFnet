@@ -316,12 +316,14 @@ def main():
                 if do_profile:
                     with torch.profiler.profile(
                         schedule=torch.profiler.schedule(wait=1, warmup=1, active=2, repeat=1),
-                        on_trace_ready=None,
-                        record_shapes=False,
-                        with_stack=False,
-                        profile_memory=False
+                        on_trace_ready=torch.profiler.tensorboard_trace_handler(profiler_log_dir),
+                        record_shapes=True,
+                        with_stack=True,
+                        profile_memory=True
                     ) as prof:
                         PINN.train(num_epoch=epochs_to_run, lr=learning_rate, scheduler=stage_scheduler, profiler=prof, start_epoch=start_epoch)
+                        if rank == 0:
+                            print(f"🔧 Profiler數據已保存至: {profiler_log_dir}")
                 else:
                     PINN.train(num_epoch=epochs_to_run, lr=learning_rate, scheduler=stage_scheduler, profiler=_Noop(), start_epoch=start_epoch)
 
