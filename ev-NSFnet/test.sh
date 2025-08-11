@@ -22,37 +22,12 @@ export TORCHDYNAMO_DISABLE=1
 export TORCH_COMPILE_DISABLE=1
 
 # 檢查並激活Python虛擬環境
-if [ -f "~/python/bin/activate" ]; then
-    source ~/python/bin/activate
-    echo "✅ Python virtual environment activated"
-else
-    echo "⚠️  Virtual environment not found at ~/python/bin/activate"
-    echo "Trying alternative paths..."
-    
-    # 嘗試其他可能的路徑
-    if [ -f "~/venv/bin/activate" ]; then
-        source ~/venv/bin/activate
-        echo "✅ Found and activated ~/venv/bin/activate"
-    elif [ -f "~/.virtualenvs/pinn/bin/activate" ]; then
-        source ~/.virtualenvs/pinn/bin/activate
-        echo "✅ Found and activated ~/.virtualenvs/pinn/bin/activate"
-    else
-        echo "🚨 No virtual environment found, using system python"
-        # 嘗試使用系統python3
-        if command -v python3 &> /dev/null; then
-            alias python=python3
-            echo "✅ Using system python3"
-        else
-            echo "❌ No python found in PATH"
-            exit 1
-        fi
-    fi
-fi
+source $HOME/python/bin/activate
 
 # 驗證Python可用性
 echo "=== Python Environment Check ==="
-which python
-python --version
+which python3
+python3 --version
 echo "================================="
 
 echo "=== GPU Information ==="
@@ -84,7 +59,7 @@ if [ "$STAGE" = "all" ]; then
         
         if [ -d "$STAGE_DIR" ]; then
             echo "--- Testing Stage $i (alpha=$ALPHA) ---"
-            python test.py --run_dir "$STAGE_DIR"
+            python3 test.py --run_dir "$STAGE_DIR"
             echo "--- Stage $i completed ---"
         else
             echo "Warning: $STAGE_DIR not found"
@@ -103,7 +78,7 @@ else
     
     if [ -d "$STAGE_DIR" ]; then
         echo "Testing: $STAGE_DIR"
-        python test.py --run_dir "$STAGE_DIR"
+        python3 test.py --run_dir "$STAGE_DIR"
     else
         echo "Error: $STAGE_DIR not found"
         echo "Expected path: $STAGE_DIR"
