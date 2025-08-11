@@ -21,7 +21,39 @@ export TORCH_COMPILE_BACKEND=eager
 export TORCHDYNAMO_DISABLE=1
 export TORCH_COMPILE_DISABLE=1
 
-source ~/python/bin/activate
+# 檢查並激活Python虛擬環境
+if [ -f "~/python/bin/activate" ]; then
+    source ~/python/bin/activate
+    echo "✅ Python virtual environment activated"
+else
+    echo "⚠️  Virtual environment not found at ~/python/bin/activate"
+    echo "Trying alternative paths..."
+    
+    # 嘗試其他可能的路徑
+    if [ -f "~/venv/bin/activate" ]; then
+        source ~/venv/bin/activate
+        echo "✅ Found and activated ~/venv/bin/activate"
+    elif [ -f "~/.virtualenvs/pinn/bin/activate" ]; then
+        source ~/.virtualenvs/pinn/bin/activate
+        echo "✅ Found and activated ~/.virtualenvs/pinn/bin/activate"
+    else
+        echo "🚨 No virtual environment found, using system python"
+        # 嘗試使用系統python3
+        if command -v python3 &> /dev/null; then
+            alias python=python3
+            echo "✅ Using system python3"
+        else
+            echo "❌ No python found in PATH"
+            exit 1
+        fi
+    fi
+fi
+
+# 驗證Python可用性
+echo "=== Python Environment Check ==="
+which python
+python --version
+echo "================================="
 
 echo "=== GPU Information ==="
 nvidia-smi --query-gpu=name,compute_cap,memory.total --format=csv,noheader,nounits
