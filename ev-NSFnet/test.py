@@ -29,13 +29,20 @@ def parse_args():
     parser = argparse.ArgumentParser(description='PINN Testing Script')
     parser.add_argument('--run_dir', type=str, required=True,
                         help='Path to the run directory containing checkpoints (e.g., ~/NSFnet/ev-NSFnet/results/Re5000/6x80_Nf120k_lamB10_alpha0.05Stage_1)')
+    parser.add_argument('--output_dir', type=str, default=None,
+                        help='Unified output directory for test results. If not specified, uses timestamp-based directory.')
     return parser.parse_args()
 
-def test_run(run_dir):
-    # 創建時間戳目錄
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    test_results_dir = f"results/test_results/{timestamp}"
-    os.makedirs(test_results_dir, exist_ok=True)
+def test_run(run_dir, output_dir=None):
+    # 使用指定的輸出目錄或創建時間戳目錄
+    if output_dir:
+        test_results_dir = output_dir
+        os.makedirs(test_results_dir, exist_ok=True)
+    else:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        test_results_dir = f"results/test_results/{timestamp}"
+        os.makedirs(test_results_dir, exist_ok=True)
+    
     print(f"Test results will be saved to: {test_results_dir}")
     
     # 從run_dir提取stage信息
@@ -118,7 +125,7 @@ if __name__ == "__main__":
         os.environ['WORLD_SIZE'] = '1'
     
     args = parse_args()
-    test_run(args.run_dir)
+    test_run(args.run_dir, args.output_dir)
 
     if is_distributed:
         cleanup_distributed()

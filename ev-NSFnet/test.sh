@@ -24,12 +24,6 @@ export TORCH_COMPILE_DISABLE=1
 # 檢查並激活Python虛擬環境
 source $HOME/python/bin/activate
 
-# 驗證Python可用性
-echo "=== Python Environment Check ==="
-which python3
-python3 --version
-echo "================================="
-
 echo "=== GPU Information ==="
 nvidia-smi --query-gpu=name,compute_cap,memory.total --format=csv,noheader,nounits
 echo "======================="
@@ -48,6 +42,11 @@ declare -A ALPHA_VALUES=(
     [5]="0.002"    # Stage_5
 )
 
+# 創建統一的測試結果目錄
+UNIFIED_OUTPUT_DIR="results/unified_test_results/$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$UNIFIED_OUTPUT_DIR"
+echo "Unified test results will be saved to: $UNIFIED_OUTPUT_DIR"
+
 # 指定要測試的stage (1-5)，或"all"測試全部
 STAGE=${1:-"all"}
 
@@ -59,7 +58,7 @@ if [ "$STAGE" = "all" ]; then
         
         if [ -d "$STAGE_DIR" ]; then
             echo "--- Testing Stage $i (alpha=$ALPHA) ---"
-            python3 test.py --run_dir "$STAGE_DIR"
+            python3 test.py --run_dir "$STAGE_DIR" --output_dir "$UNIFIED_OUTPUT_DIR"
             echo "--- Stage $i completed ---"
         else
             echo "Warning: $STAGE_DIR not found"
@@ -78,7 +77,7 @@ else
     
     if [ -d "$STAGE_DIR" ]; then
         echo "Testing: $STAGE_DIR"
-        python3 test.py --run_dir "$STAGE_DIR"
+        python3 test.py --run_dir "$STAGE_DIR" --output_dir "$UNIFIED_OUTPUT_DIR"
     else
         echo "Error: $STAGE_DIR not found"
         echo "Expected path: $STAGE_DIR"
