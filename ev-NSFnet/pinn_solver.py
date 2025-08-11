@@ -1467,7 +1467,20 @@ class PysicsInformedNeuralNetwork:
             data_points_per_second = data_points / avg_epoch_time if avg_epoch_time > 0 else 0
             print(f"\n🚀 效率指標:")
             print(f"   資料處理速度: {data_points_per_second:,.0f} points/sec")
-            print(f"   Alpha EVM: {self.alpha_evm}")
+            
+            # 物理參數診斷 - 計算等效雷諾數
+            vis_t_mean = getattr(self, 'vis_t', torch.tensor(0.0)).mean().item()
+            base_visc = 1.0/self.Re
+            Re_eff = 1.0 / (base_visc + vis_t_mean) if vis_t_mean > 0 else self.Re
+            vis_ratio = vis_t_mean / base_visc if base_visc > 0 else 0
+            
+            print(f"\n🔬 物理參數診斷:")
+            print(f"   目標雷諾數: {self.Re}")
+            print(f"   等效雷諾數: {Re_eff:.1f}")
+            print(f"   Alpha EVM: {self.alpha_evm:.4f}")
+            print(f"   EVM放大倍數: {vis_ratio:.2f}x")
+            if Re_eff < 1000:
+                print(f"   ⚠️  警告: Re_eff過低可能導致Couette流!")
             
             print(f"{'='*100}\n")
             
@@ -1478,6 +1491,17 @@ class PysicsInformedNeuralNetwork:
             print(f"   Epoch: {epoch_id + 1:,} / {num_epoch:,}")
             print(f"   學習率: {current_lr:.2e} | 資料點: {data_points:,}")
             print(f"   損失 - 總: {loss:.3e} | 方程: {losses[0]:.3e} | 邊界: {losses[1]:.3e}")
+            
+            # 物理參數診斷 - 計算等效雷諾數
+            vis_t_mean = getattr(self, 'vis_t', torch.tensor(0.0)).mean().item()
+            base_visc = 1.0/self.Re
+            Re_eff = 1.0 / (base_visc + vis_t_mean) if vis_t_mean > 0 else self.Re
+            vis_ratio = vis_t_mean / base_visc if base_visc > 0 else 0
+            
+            print(f"   🔬 Re_eff: {Re_eff:.1f} | α_EVM: {self.alpha_evm:.4f} | EVM: {vis_ratio:.1f}x")
+            if Re_eff < 1000:
+                print(f"   ⚠️  警告: Re_eff={Re_eff:.1f} 過低，可能導致Couette流!")
+            
             print(f"   (時間預估將在第10個epoch後提供)")
             print(f"{'='*80}\n")
 
