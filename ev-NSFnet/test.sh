@@ -62,7 +62,7 @@ echo "======================="
 echo "Test start: $(date)"
 
 # 基於你的實際目錄結構
-BASE_DIR="~/NSFnet/ev-NSFnet/results/Re5000/result1"
+BASE_DIR="results/Re5000/result1"
 
 # 修正後的Stage參數對應 (根據實際目錄結構)
 declare -A ALPHA_VALUES=(
