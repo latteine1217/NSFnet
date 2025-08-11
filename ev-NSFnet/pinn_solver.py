@@ -1125,9 +1125,12 @@ class PysicsInformedNeuralNetwork:
                     scheduler_name = type(active_scheduler).__name__
                     print(f"🔧 {scheduler_name} step {epoch_id}: lr {old_lr:.6f} -> {new_lr:.6f}")
                 
-                # 更新last_epoch参数以保持状态同步
+                # 關鍵：保存scheduler的完整狀態
                 if self.current_scheduler_params is not None:
                     self.current_scheduler_params['last_epoch'] = active_scheduler.last_epoch
+                    # 對於CosineAnnealingLR，額外保存當前的學習率狀態
+                    if hasattr(active_scheduler, 'T_max'):
+                        self.current_scheduler_params['current_lr'] = new_lr
             
             # 步數與滑窗
             self.global_step += 1
@@ -1225,10 +1228,10 @@ class PysicsInformedNeuralNetwork:
     
     def freeze_evm_net(self, epoch_id):
         """
-        凍結EVM網路參數 - 使用static_graph=True避免DDP bucket重建問題
+        凍結EVM網路參數 - 保持scheduler連續性
         """
         if self.rank == 0:
-            print(f"[Epoch {epoch_id}] Freezing EVM network parameters (DDP-compatible)")
+            print(f"[Epoch {epoch_id}] Freezing EVM network parameters (保持scheduler連續性)")
         
         # 凍結net_1的所有參數
         for param in self.net_1.parameters():
@@ -1240,9 +1243,11 @@ class PysicsInformedNeuralNetwork:
             if param.requires_grad:
                 active_params.append(param)
         
+        # 保存當前學習率和scheduler狀態
+        current_lr = self.opt.param_groups[0]['lr'] if self.opt else 1e-3
+        
         # 重新初始化優化器以確保參數組同步
         if len(active_params) > 0:
-            current_lr = self.opt.param_groups[0]['lr']
             optimizer_class = type(self.opt)
             self.opt = optimizer_class(active_params, lr=current_lr)
             self.opt.state.clear()
@@ -1251,11 +1256,16 @@ class PysicsInformedNeuralNetwork:
             for group in self.opt.param_groups:
                 group['initial_lr'] = current_lr
             
-            # 重建scheduler以绑定新的optimizer
-            self._rebuild_scheduler()
+            # 關鍵修復：不重建scheduler，只是重新綁定到新optimizer
+            # 保持學習率連續性
+            if self.current_scheduler is not None and hasattr(self.current_scheduler, 'optimizer'):
+                self.current_scheduler.optimizer = self.opt
+                # 手動設置學習率確保一致性
+                for group in self.opt.param_groups:
+                    group['lr'] = current_lr
             
             if self.rank == 0:
-                print(f"  Optimizer reinitialized with {len(active_params)} parameters (net only), state cleared.")
+                print(f"  Optimizer重建，保持lr={current_lr:.6f}，參數數量: {len(active_params)}")
         else:
             if self.rank == 0:
                 print("  No active parameters found for main network, optimizer not reinitialized.")
@@ -1265,10 +1275,10 @@ class PysicsInformedNeuralNetwork:
 
     def defreeze_evm_net(self, epoch_id):
         """
-        解凍EVM網路參數 - 使用static_graph=True避免DDP bucket重建問題
+        解凍EVM網路參數 - 保持scheduler連續性
         """
         if self.rank == 0:
-            print(f"[Epoch {epoch_id}] Unfreezing EVM network parameters (DDP-compatible)")
+            print(f"[Epoch {epoch_id}] Unfreezing EVM network parameters (保持scheduler連續性)")
         
         # 解凍net_1的所有參數
         for param in self.net_1.parameters():
@@ -1280,9 +1290,11 @@ class PysicsInformedNeuralNetwork:
             if param.requires_grad:
                 all_params.append(param)
         
+        # 保存當前學習率
+        current_lr = self.opt.param_groups[0]['lr'] if self.opt else 1e-3
+        
         # 重新初始化優化器以確保參數組同步
         if len(all_params) > 0:
-            current_lr = self.opt.param_groups[0]['lr']
             optimizer_class = type(self.opt)
             self.opt = optimizer_class(all_params, lr=current_lr)
             self.opt.state.clear()
@@ -1291,11 +1303,16 @@ class PysicsInformedNeuralNetwork:
             for group in self.opt.param_groups:
                 group['initial_lr'] = current_lr
             
-            # 重建scheduler以绑定新的optimizer
-            self._rebuild_scheduler()
+            # 關鍵修復：不重建scheduler，只是重新綁定到新optimizer
+            # 保持學習率連續性
+            if self.current_scheduler is not None and hasattr(self.current_scheduler, 'optimizer'):
+                self.current_scheduler.optimizer = self.opt
+                # 手動設置學習率確保一致性
+                for group in self.opt.param_groups:
+                    group['lr'] = current_lr
             
             if self.rank == 0:
-                print(f"  Optimizer reinitialized with {len(all_params)} parameters (net + net_1), state cleared.")
+                print(f"  Optimizer重建，保持lr={current_lr:.6f}，參數數量: {len(all_params)}")
         else:
             if self.rank == 0:
                 print("  No active parameters found for both networks, optimizer not reinitialized.")
@@ -1311,6 +1328,9 @@ class PysicsInformedNeuralNetwork:
             return
             
         try:
+            # 保存當前學習率以確保連續性
+            current_lr = self.opt.param_groups[0]['lr']
+            
             # 确保optimizer参数组有initial_lr
             for group in self.opt.param_groups:
                 if 'initial_lr' not in group:
@@ -1318,34 +1338,55 @@ class PysicsInformedNeuralNetwork:
             
             scheduler_class = self.current_scheduler_params['class']
             
-            # 關鍵修復：使用階段內步數，而不是全局步數
-            # CosineAnnealingLR需要的是當前階段內的進度
-            stage_epoch = self.stage_step if hasattr(self, 'stage_step') else 0
-            
+            # 關鍵修復：重建時不改變當前學習率，保持原有進度
             if scheduler_class.__name__ == 'CosineAnnealingLR':
+                # 創建新scheduler，但立即設置到當前學習率
                 self.current_scheduler = scheduler_class(
                     self.opt, 
                     T_max=self.current_scheduler_params['T_max'],
                     eta_min=self.current_scheduler_params['eta_min'],
-                    last_epoch=stage_epoch - 1  # PyTorch expects last_epoch = current_epoch - 1
+                    last_epoch=-1  # 讓scheduler從初始狀態開始
                 )
+                
+                # 手動設置學習率保持連續性
+                for group in self.opt.param_groups:
+                    group['lr'] = current_lr
+                    
+                # 更新scheduler的last_epoch以匹配當前進度
+                stage_epoch = self.stage_step if hasattr(self, 'stage_step') else 0
+                self.current_scheduler.last_epoch = stage_epoch - 1
+                
                 if self.rank == 0:
-                    print(f"  ✅ 重建CosineAnnealingLR: stage_epoch={stage_epoch}, T_max={self.current_scheduler_params['T_max']}, eta_min={self.current_scheduler_params['eta_min']:.2e}")
+                    print(f"  ✅ 重建CosineAnnealingLR: 保持lr={current_lr:.6f}, stage_epoch={stage_epoch}")
                     
             elif scheduler_class.__name__ == 'MultiStepLR':
+                # 創建新scheduler並設置當前學習率
                 self.current_scheduler = scheduler_class(
                     self.opt,
                     milestones=self.current_scheduler_params['milestones'],
                     gamma=self.current_scheduler_params['gamma'],
-                    last_epoch=stage_epoch - 1
+                    last_epoch=-1
                 )
+                
+                # 手動設置學習率保持連續性
+                for group in self.opt.param_groups:
+                    group['lr'] = current_lr
+                    
+                stage_epoch = self.stage_step if hasattr(self, 'stage_step') else 0
+                self.current_scheduler.last_epoch = stage_epoch - 1
+                
                 if self.rank == 0:
-                    print(f"  ✅ 重建MultiStepLR: stage_epoch={stage_epoch}, milestones={self.current_scheduler_params['milestones']}")
+                    print(f"  ✅ 重建MultiStepLR: 保持lr={current_lr:.6f}, stage_epoch={stage_epoch}")
             else:
                 # 对于其他类型的scheduler，尝试通用重建
                 self.current_scheduler = scheduler_class(self.opt)
+                
+                # 保持當前學習率
+                for group in self.opt.param_groups:
+                    group['lr'] = current_lr
+                    
                 if self.rank == 0:
-                    print(f"  ✅ 重建{scheduler_class.__name__}: stage_epoch={stage_epoch}")
+                    print(f"  ✅ 重建{scheduler_class.__name__}: 保持lr={current_lr:.6f}")
                 
         except Exception as e:
             if self.rank == 0:
