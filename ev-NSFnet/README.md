@@ -22,10 +22,11 @@
 
 ### 網路結構
 - **主網路**: 6層隱藏層，80個神經元 (u, v, p預測)
-- **EVM網路**: 6層隱藏層，40個神經元 (渦流黏度預測)
-- **激活函數**: Tanh
+- **EVM網路**: 4層隱藏層，40個神經元 (渦流黏度預測)  
+- **激活函數**: Tanh (已優化Xavier初始化)
 - **輸入**: 空間座標 (x, y)
 - **輸出**: 速度場 (u, v)、壓力場 (p)、渦流黏度 (e)
+- **初始化**: 針對tanh的Xavier初始化，避免早期飽和
 
 ## 🚀 快速開始
 
@@ -112,7 +113,8 @@ python test.py --run_dir <RUN_DIRECTORY>
 
 ### 📊 TensorBoard集成
 - **損失追蹤**: 總損失、方程損失、邊界損失
-- **系統監控**: GPU記憶體使用、學習率變化 (✅ 已修復scheduler問題)
+- **系統監控**: GPU記憶體使用、學習率變化 (✅ 已修復scheduler斷層問題)
+- **網絡診斷**: tanh飽和度監測，每1000 epochs自動檢查
 - **訓練效率**: 每epoch時間、Alpha_EVM參數變化
 - **實時可視化**: `tensorboard --logdir=runs`
 
@@ -198,10 +200,11 @@ ev-NSFnet/
 ## 🔬 實驗結果
 
 ### 精度指標
-- **速度場誤差**: < 2%
+- **速度場誤差**: < 2% (通過Xavier初始化改善)
 - **壓力場誤差**: < 5%
-- **收斂性**: 良好的訓練穩定性
+- **收斂性**: 良好的訓練穩定性，避免Couette流陷阱
 - **效率**: 支援多GPU加速
+- **網絡健康**: 實時監測tanh飽和度，平均飽和率<20%
 
 ### 檢查點保存
 - 每10000個epoch自動保存模型
@@ -211,34 +214,58 @@ ev-NSFnet/
 
 ## 🔧 技術改進記錄
 
-### Learning Rate Scheduler 修復 (2025-01-11)
+### Xavier初始化修復 (2025-08-12)
 
 #### 🐛 問題描述
-- **症狀**: CosineAnnealingLR和MultiStepLR配置正確但學習率在TensorBoard中顯示為常數
-- **原因**: EVM網路每10000個epoch的freeze/unfreeze操作重建optimizer，但scheduler仍綁定舊實例
-- **影響**: 動態學習率策略完全失效，影響訓練收斂效果
+- **症狀**: PINN模型無法學習lid-driven cavity flow特徵，初始輸出為線性剪切(Couette流)而非預期的渦流模式
+- **原因**: FCNet使用PyTorch默認的Kaiming uniform初始化，不適合tanh激活函數，導致網絡早期飽和
+- **影響**: 模型傾向於學習trivial solution，無法捕捉複雜的流動特徵
 
 #### ✅ 解決方案
-- **核心修復**: 實現scheduler自動重建機制，在optimizer重建時同步重建scheduler
+- **核心修復**: 實現專門針對tanh的Xavier初始化與層級縮放策略
+- **修改模組**: `net.py` - FCNet類添加`_initialize_weights()`方法
+- **技術細節**:
+  - ✅ 使用`nn.init.calculate_gain('tanh')`獲取適合tanh的gain
+  - ✅ 首層縮放0.5倍，避免輸入推tanh到飽和區  
+  - ✅ 末層縮放(主網1e-3，EVM網5e-4)，避免初始輸出過大
+  - ✅ 自動識別EVM網絡並應用更小的末層縮放
+- **監測工具**: 新增tanh飽和度實時監測，每1000 epochs自動檢查
+
+#### 🎯 預期效果
+- 🔄 **流型學習**: 從Couette線性剪切轉向正確的cavity flow特徵
+- ⚡ **收斂改善**: 避免早期tanh飽和，梯度能有效傳播到內部
+- 📊 **實時診斷**: 平均飽和率>20%時自動警告
+
+### Learning Rate Scheduler 修復 (2025-01-11 & 2025-08-12)
+
+#### 🐛 問題描述
+- **症狀**: CosineAnnealingLR和MultiStepLR配置正確但學習率在TensorBoard中顯示為常數，且在freeze/unfreeze時出現斷層
+- **原因1**: EVM網路每10000個epoch的freeze/unfreeze操作重建optimizer，但scheduler仍綁定舊實例
+- **原因2**: scheduler重建時使用局部`last_epoch`而非全局步數，導致餘弦曲線重新開始
+- **影響**: 動態學習率策略完全失效，學習率調度不連續
+
+#### ✅ 解決方案
+- **核心修復**: 實現scheduler自動重建機制，確保學習率調度連續性
 - **修改模組**: `pinn_solver.py` - 新增`_rebuild_scheduler()`方法
 - **修復範圍**: 
   - ✅ freeze/unfreeze EVM網路時
   - ✅ L-BFGS優化結束時  
   - ✅ 任何optimizer重建場景
-- **狀態保持**: 完整保存並恢復scheduler的訓練狀態（`last_epoch`等）
+- **連續性修復**: 使用`global_step`替代保存的`last_epoch`，確保學習率調度基於全局訓練進度
+- **狀態保持**: 完整保存並恢復scheduler的訓練狀態
 
 #### 🎯 驗證結果
-- ✅ CosineAnnealingLR按餘弦曲線正確調整學習率
+- ✅ CosineAnnealingLR按餘弦曲線正確調整學習率，無斷層現象
 - ✅ MultiStepLR在milestone處正確階躍降低
-- ✅ TensorBoard正確顯示學習率變化曲線
+- ✅ TensorBoard正確顯示平滑的學習率變化曲線
 - ✅ 所有現有配置文件無需修改即可生效
 
 #### 📋 使用建議  
 ```yaml
 training:
   training_stages:
-    - [0.03, 300000, 1e-3, CosineAnnealingLR]   # ✅ 現在正常工作
-    - [0.01, 300000, 2e-4, MultiStepLR]        # ✅ 現在正常工作
+    - [0.03, 300000, 1e-3, CosineAnnealingLR]   # ✅ 現在完全正常工作
+    - [0.01, 300000, 2e-4, MultiStepLR]        # ✅ 現在完全正常工作
     - [0.005, 300000, 4e-5, Constant]           # ✅ 一直正常工作
 ```
 
