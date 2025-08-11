@@ -12,7 +12,7 @@ training:
   batch_size: null  # 全批次訓練
   checkpoint_freq: 10000       # 檢查點保存頻率
   training_stages:
-    - [0.03, 200000, 1e-3, Constant]            # Stage 1
+    - [0.05, 200000, 1e-3, CosineAnnealingLR]   # Stage 1
     - [0.01, 200000, 2e-4, CosineAnnealingLR]   # Stage 2
     - [0.005, 200000, 4e-5, CosineAnnealingLR]  # Stage 3
     - [0.001, 200000, 1e-5, CosineAnnealingLR]  # Stage 4
