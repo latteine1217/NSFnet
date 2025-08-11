@@ -956,6 +956,21 @@ class PysicsInformedNeuralNetwork:
                 'gamma': getattr(scheduler, 'gamma', None),
                 'last_epoch': scheduler.last_epoch
             }
+            
+            # Debug輸出確認scheduler參數
+            if self.rank == 0:
+                scheduler_name = type(scheduler).__name__
+                if scheduler_name == 'CosineAnnealingLR':
+                    print(f"🔧 Scheduler初始化: {scheduler_name}")
+                    print(f"   - T_max: {scheduler.T_max}")
+                    print(f"   - eta_min: {scheduler.eta_min:.2e}")
+                    print(f"   - 初始lr: {self.opt.param_groups[0]['lr']:.2e}")
+                elif scheduler_name == 'MultiStepLR':
+                    print(f"🔧 Scheduler初始化: {scheduler_name}")
+                    print(f"   - milestones: {scheduler.milestones}")
+                    print(f"   - gamma: {scheduler.gamma}")
+                else:
+                    print(f"🔧 Scheduler初始化: {scheduler_name}")
         
         # 啟用初始凍結
         self.freeze_evm_net(0)
@@ -1001,7 +1016,9 @@ class PysicsInformedNeuralNetwork:
         # 滑窗與步數計數
         if not hasattr(self, 'global_step'):
             self.global_step = 0
-        self.stage_step = 0
+        # 關鍵修復：每個新階段都重置stage_step
+        self.stage_step = start_epoch  # 從start_epoch開始，而不是0
+        
         from collections import deque
         if not hasattr(self, 'stage_loss_deque') or self.stage_step == 0:
             self.stage_loss_deque = deque(maxlen=20000)
@@ -1096,10 +1113,18 @@ class PysicsInformedNeuralNetwork:
                     raise e
             
             # Scheduler步進 - 必須在optimizer.step()之後
-            # 使用存储的scheduler，以防原始scheduler失效
-            active_scheduler = self.current_scheduler if self.current_scheduler is not None else scheduler
+            # 優先使用傳入的scheduler，避免freeze/unfreeze後的scheduler失效問題
+            active_scheduler = scheduler if scheduler is not None else self.current_scheduler
             if active_scheduler:
+                old_lr = self.opt.param_groups[0]['lr']
                 active_scheduler.step()
+                new_lr = self.opt.param_groups[0]['lr']
+                
+                # Debug輸出檢查scheduler是否正常工作 (每1000步一次)
+                if self.rank == 0 and epoch_id % 1000 == 0:
+                    scheduler_name = type(active_scheduler).__name__
+                    print(f"🔧 {scheduler_name} step {epoch_id}: lr {old_lr:.6f} -> {new_lr:.6f}")
+                
                 # 更新last_epoch参数以保持状态同步
                 if self.current_scheduler_params is not None:
                     self.current_scheduler_params['last_epoch'] = active_scheduler.last_epoch
@@ -1128,8 +1153,11 @@ class PysicsInformedNeuralNetwork:
                 for group in self.opt.param_groups:
                     group['initial_lr'] = current_lr
                 
-                # 重建scheduler以绑定新的optimizer
+                # 關鍵修復：L-BFGS結束後必須重建scheduler
                 self._rebuild_scheduler()
+                if self.rank == 0:
+                    scheduler_status = "重建成功" if self.current_scheduler is not None else "重建失敗"  
+                    print(f"🔧 Scheduler {scheduler_status}")
                 
                 self.last_strategy_step = self.stage_step
 
@@ -1278,6 +1306,8 @@ class PysicsInformedNeuralNetwork:
     def _rebuild_scheduler(self):
         """重建scheduler以绑定新的optimizer，確保學習率連續性"""
         if self.current_scheduler is None or self.current_scheduler_params is None:
+            if self.rank == 0:
+                print("  Warning: 無法重建scheduler - 缺少參數")
             return
             
         try:
@@ -1288,34 +1318,38 @@ class PysicsInformedNeuralNetwork:
             
             scheduler_class = self.current_scheduler_params['class']
             
-            # 關鍵修復：使用全局步數而非保存的last_epoch
-            # 這確保了freeze/unfreeze後學習率調度的連續性
-            global_epoch = self.global_step  # 使用全局步數
+            # 關鍵修復：使用階段內步數，而不是全局步數
+            # CosineAnnealingLR需要的是當前階段內的進度
+            stage_epoch = self.stage_step if hasattr(self, 'stage_step') else 0
             
             if scheduler_class.__name__ == 'CosineAnnealingLR':
                 self.current_scheduler = scheduler_class(
                     self.opt, 
                     T_max=self.current_scheduler_params['T_max'],
                     eta_min=self.current_scheduler_params['eta_min'],
-                    last_epoch=global_epoch  # 使用全局步數保持連續性
+                    last_epoch=stage_epoch - 1  # PyTorch expects last_epoch = current_epoch - 1
                 )
+                if self.rank == 0:
+                    print(f"  ✅ 重建CosineAnnealingLR: stage_epoch={stage_epoch}, T_max={self.current_scheduler_params['T_max']}, eta_min={self.current_scheduler_params['eta_min']:.2e}")
+                    
             elif scheduler_class.__name__ == 'MultiStepLR':
                 self.current_scheduler = scheduler_class(
                     self.opt,
                     milestones=self.current_scheduler_params['milestones'],
                     gamma=self.current_scheduler_params['gamma'],
-                    last_epoch=global_epoch  # 使用全局步數保持連續性
+                    last_epoch=stage_epoch - 1
                 )
+                if self.rank == 0:
+                    print(f"  ✅ 重建MultiStepLR: stage_epoch={stage_epoch}, milestones={self.current_scheduler_params['milestones']}")
             else:
                 # 对于其他类型的scheduler，尝试通用重建
                 self.current_scheduler = scheduler_class(self.opt)
-                
-            if self.rank == 0:
-                print(f"  Scheduler rebuilt: {scheduler_class.__name__} (global_step={global_epoch})")
+                if self.rank == 0:
+                    print(f"  ✅ 重建{scheduler_class.__name__}: stage_epoch={stage_epoch}")
                 
         except Exception as e:
             if self.rank == 0:
-                print(f"  Warning: Failed to rebuild scheduler: {e}")
+                print(f"  ❌ Scheduler重建失敗: {e}")
             self.current_scheduler = None
 
     def safe_tensorboard_log(self, tag, value, global_step):
