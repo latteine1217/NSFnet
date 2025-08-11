@@ -1586,7 +1586,7 @@ class PysicsInformedNeuralNetwork:
             print('Error v: %.2f %%' % (error_v))
             print('Error p: %.2f %%' % (error_p))
 
-    def test(self, x, y, u, v, p, loop=None):
+    def test(self, x, y, u, v, p, loop=None, custom_save_dir=None):
         """ testing all points in the domain """
         x_test = x.reshape(-1,1)
         y_test = y.reshape(-1,1)
@@ -1623,19 +1623,26 @@ class PysicsInformedNeuralNetwork:
             NNsize = str(self.layers) + 'x' + str(self.hidden_size) + '_Nf'+str(np.int32(self.N_f/1000)) + 'k'
             lambdas = 'lamB'+str(self.alpha_b) + '_alpha'+str(self.alpha_evm) + str(self.current_stage)
             
-            # 從config.py讀取基礎路徑
-            try:
-                from config import RESULTS_PATH
-                base_path = RESULTS_PATH
-            except ImportError:
-                base_path = 'results'
+            if custom_save_dir:
+                # 使用自定義保存目錄
+                relative_path = custom_save_dir
+                filename = f'test_result_epoch_{loop:07d}.mat'  # 7位數字，方便排序
+            else:
+                # 使用原來的邏輯
+                # 從config.py讀取基礎路徑
+                try:
+                    from config import RESULTS_PATH
+                    base_path = RESULTS_PATH
+                except ImportError:
+                    base_path = 'results'
 
-            relative_path = os.path.join(base_path, Re_folder, f"{NNsize}_{lambdas}")
+                relative_path = os.path.join(base_path, Re_folder, f"{NNsize}_{lambdas}")
+                filename = f'cavity_result_loop_{loop}.mat'
 
             if not os.path.exists(relative_path):
-                os.makedirs(relative_path)
+                os.makedirs(relative_path, exist_ok=True)
 
-            file_path = os.path.join(relative_path, 'cavity_result_loop_%d.mat'%(loop))
+            file_path = os.path.join(relative_path, filename)
 
             scipy.io.savemat(file_path,
                         {'U_pred':u_pred,
@@ -1646,7 +1653,9 @@ class PysicsInformedNeuralNetwork:
                          'error_v':error_v,
                          'error_p':error_p,
                          'lam_bcs':self.alpha_b,
-                         'lam_equ':self.alpha_e})
+                         'lam_equ':self.alpha_e,
+                         'global_epoch':loop,  # 添加全局epoch信息
+                         'stage_info': getattr(self, 'current_stage', 'unknown')})  # 添加stage信息
 
     def save(self, filename, directory=None, N_HLayer=None, N_neu=None, N_f=None):
         Re_folder = 'Re'+str(self.Re)

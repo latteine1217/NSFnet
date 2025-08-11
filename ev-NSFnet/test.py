@@ -23,6 +23,7 @@ import csv
 import os
 import argparse
 import re
+import datetime
 
 def parse_args():
     parser = argparse.ArgumentParser(description='PINN Testing Script')
@@ -31,6 +32,20 @@ def parse_args():
     return parser.parse_args()
 
 def test_run(run_dir):
+    # 創建時間戳目錄
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    test_results_dir = f"results/test_results/{timestamp}"
+    os.makedirs(test_results_dir, exist_ok=True)
+    print(f"Test results will be saved to: {test_results_dir}")
+    
+    # 從run_dir提取stage信息
+    stage_match = re.search(r'Stage_(\d+)', run_dir)
+    stage_num = int(stage_match.group(1)) if stage_match else 1
+    
+    # 根據配置定義每個stage的epoch數（需要與train配置一致）
+    epochs_per_stage = 300000  # 可以後續從配置文件讀取
+    print(f"Detected Stage: {stage_num}, epochs per stage: {epochs_per_stage}")
+    
     Re = 5000   # Reynolds number (This should ideally be read from checkpoint or config)
     N_neu = 80
     N_neu_1 = 40
@@ -85,10 +100,14 @@ def test_run(run_dir):
         # Extract epoch from filename for loop parameter
         match = re.search(r'epoch_(\d+)\.pth', checkpoint_file)
         current_epoch = int(match.group(1)) if match else 0
+        
+        # 計算全局epoch
+        global_epoch = (stage_num - 1) * epochs_per_stage + current_epoch
+        print(f"Stage {stage_num}, local epoch {current_epoch} → global epoch {global_epoch}")
 
         # Evaluating
         PINN.evaluate(x_star, y_star, u_star, v_star, p_star)
-        PINN.test(x_star, y_star, u_star, v_star, p_star, current_epoch)
+        PINN.test(x_star, y_star, u_star, v_star, p_star, global_epoch, test_results_dir)
 
 if __name__ == "__main__":
     is_distributed = setup_distributed()
