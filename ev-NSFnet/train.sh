@@ -28,6 +28,5 @@ nvidia-smi --query-gpu=name,compute_cap,memory.total --format=csv,noheader,nouni
 echo "======================="
 
 echo "Job start: $(date)"
-time torchrun --nproc_per_node=2 --nnodes=1 --node_rank=0 \
-        train.py --config configs/production.yaml
+time torchrun --nproc_per_node=2 --nnodes=1 --node_rank=0 train.py
 echo "Job end: $(date)"

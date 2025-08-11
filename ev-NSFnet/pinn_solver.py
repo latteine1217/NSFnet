@@ -360,6 +360,46 @@ class PysicsInformedNeuralNetwork:
             return total_norm
         return 0.0
 
+    def check_tanh_saturation(self, epoch_id):
+        """檢測tanh激活函數飽和情況"""
+        if epoch_id % 1000 == 0 and self.rank == 0:  # 每1000個epoch檢查一次，僅主進程
+            saturation_info = []
+            
+            # 檢查主網絡
+            with torch.no_grad():
+                test_input = torch.cat([self.x_f[:100], self.y_f[:100]], dim=1)
+                layer_count = 0
+                
+                for name, module in self.get_model(self.net).named_modules():
+                    if isinstance(module, torch.nn.Linear):
+                        pre_activation = torch.matmul(test_input, module.weight.T) + module.bias
+                        saturation_ratio = (pre_activation.abs() > 3.0).float().mean().item()
+                        saturation_info.append((f"主網絡_Layer{layer_count}", saturation_ratio))
+                        test_input = torch.tanh(pre_activation)
+                        layer_count += 1
+                
+                # 檢查EVM網絡
+                test_input_evm = torch.cat([self.x_f[:100], self.y_f[:100]], dim=1)
+                layer_count = 0
+                
+                for name, module in self.get_model(self.net_1).named_modules():
+                    if isinstance(module, torch.nn.Linear):
+                        pre_activation = torch.matmul(test_input_evm, module.weight.T) + module.bias
+                        saturation_ratio = (pre_activation.abs() > 3.0).float().mean().item()
+                        saturation_info.append((f"EVM網絡_Layer{layer_count}", saturation_ratio))
+                        test_input_evm = torch.tanh(pre_activation)
+                        layer_count += 1
+            
+            # 輸出診斷信息
+            high_saturation_layers = [(name, ratio) for name, ratio in saturation_info if ratio > 0.3]
+            if high_saturation_layers:
+                self.logger.warning(f"⚠️  高飽和層 (>30%): {high_saturation_layers}")
+            
+            # 簡要統計
+            avg_saturation = sum(ratio for _, ratio in saturation_info) / len(saturation_info)
+            if avg_saturation > 0.2:
+                self.logger.warning(f"🔥 平均飽和率: {avg_saturation*100:.1f}% (建議<20%)")
+
     def initialize_NN(self,
                       num_ins=3,
                       num_outs=3,
@@ -1138,6 +1178,9 @@ class PysicsInformedNeuralNetwork:
                 self.print_log_full_batch_with_time_estimate(epoch_loss, epoch_losses, epoch_id, num_epoch, actual_data_points)
                 
                 # 每1000個epoch輸出健康和記憶體報告
+                
+                # 每1000個epoch檢查tanh飽和度
+                self.check_tanh_saturation(epoch_id)
 
 
             # Save checkpoint

@@ -15,6 +15,7 @@
 # Author: Zhicheng Wang, Hui Xiang
 # Created: 08.03.2023
 import torch
+import torch.nn as nn
 from collections import OrderedDict
 
 # neural network
@@ -47,6 +48,38 @@ class FCNet(torch.nn.Module):
 
         # deploy layers
         self.layers = torch.nn.Sequential(layerDict)
+        
+        # 應用針對tanh的Xavier初始化
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        """針對tanh的Xavier初始化 + 首/末層縮放"""
+        gain = nn.init.calculate_gain('tanh')
+        layers_list = []
+        
+        # 收集所有Linear層
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                layers_list.append(module)
+        
+        # 對每層應用Xavier初始化
+        for i, layer in enumerate(layers_list):
+            nn.init.xavier_uniform_(layer.weight, gain=gain)
+            nn.init.zeros_(layer.bias)
+            
+            # 首層縮放 (避免輸入推tanh到飽和)
+            if i == 0:
+                with torch.no_grad():
+                    layer.weight.mul_(0.5)
+            
+            # 末層縮放 (避免初始輸出過大)
+            elif i == len(layers_list) - 1:
+                with torch.no_grad():
+                    # EVM網絡末層更小，通過輸出維度判斷
+                    is_evm = (layer.out_features == 1)
+                    scale = 5e-4 if is_evm else 1e-3
+                    layer.weight.mul_(scale)
+                    layer.bias.zero_()
 
     def forward(self, x):
         out = self.layers(x)
