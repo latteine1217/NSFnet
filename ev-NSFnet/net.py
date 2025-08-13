@@ -75,7 +75,7 @@ class FCNet(torch.nn.Module):
                 is_evm = (layer.out_features == 1)
                 if is_evm:
                     # EVM: 初始值應接近alpha_evm初始值
-                    scale = 0.01  # 5e-4 → 0.01 (提升20倍)
+                    scale = 0.1   # 調整EVM網路初始化縮放因子
                 else:
                     # 主網路: 初始值應為物理量級的10-20%
                     scale = 0.1   # 1e-3 → 0.1 (提升100倍)
