@@ -53,8 +53,8 @@ class FCNet(torch.nn.Module):
         self._initialize_weights()
 
     def _initialize_weights(self):
-        """針對tanh的Xavier初始化 + 首/末層縮放"""
-        gain = nn.init.calculate_gain('tanh')
+        """優化的Xavier初始化策略"""
+        gain = nn.init.calculate_gain('tanh')  # ≈ 5/3
         layers_list = []
         
         # 收集所有Linear層
@@ -67,19 +67,19 @@ class FCNet(torch.nn.Module):
             nn.init.xavier_uniform_(layer.weight, gain=gain)
             nn.init.zeros_(layer.bias)
             
-            # 首層縮放 (避免輸入推tanh到飽和)
             if i == 0:
-                with torch.no_grad():
-                    layer.weight.mul_(0.5)
-            
-            # 末層縮放 (避免初始輸出過大)
+                # 首層: 溫和縮放，避免輸入飽和
+                layer.weight.mul_(0.6)  # 當前0.5 → 0.6
             elif i == len(layers_list) - 1:
-                with torch.no_grad():
-                    # EVM網絡末層更小，通過輸出維度判斷
-                    is_evm = (layer.out_features == 1)
-                    scale = 5e-4 if is_evm else 1e-3
-                    layer.weight.mul_(scale)
-                    layer.bias.zero_()
+                # 末層: 基於物理量級設計
+                is_evm = (layer.out_features == 1)
+                if is_evm:
+                    # EVM: 初始值應接近alpha_evm初始值
+                    scale = 0.01  # 5e-4 → 0.01 (提升20倍)
+                else:
+                    # 主網路: 初始值應為物理量級的10-20%
+                    scale = 0.1   # 1e-3 → 0.1 (提升100倍)
+                layer.weight.mul_(scale)
 
     def forward(self, x):
         out = self.layers(x)
