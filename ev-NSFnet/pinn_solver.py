@@ -174,12 +174,14 @@ class PysicsInformedNeuralNetwork:
             self.net = DDP(self.net, 
                            device_ids=[self.local_rank], 
                            output_device=self.local_rank,
-                              find_unused_parameters=False,                           broadcast_buffers=True,        # 確保buffer同步
+                           find_unused_parameters=False,                           
+                           broadcast_buffers=True,        # 確保buffer同步
                            gradient_as_bucket_view=True)  # 提升記憶體效率
             self.net_1 = DDP(self.net_1, 
                              device_ids=[self.local_rank], 
                              output_device=self.local_rank,
-                           find_unused_parameters=False,                             broadcast_buffers=True,        # 確保buffer同步
+                             find_unused_parameters=False,                             
+                             broadcast_buffers=True,        # 確保buffer同步
                              gradient_as_bucket_view=True)  # 提升記憶體效率
 
         if net_params:
@@ -397,6 +399,74 @@ class PysicsInformedNeuralNetwork:
             
             # 簡要統計
             avg_saturation = sum(ratio for _, ratio in saturation_info) / len(saturation_info)
+            
+            # 記錄到TensorBoard
+            if self.tb_writer is not None:
+                self.safe_tensorboard_log('NetworkHealth/Avg_Saturation_Rate', avg_saturation, epoch_id)
+                for name, ratio in saturation_info:
+                    self.safe_tensorboard_log(f'NetworkHealth/Saturation_{name}', ratio, epoch_id)
+            
+            # 梯度分析 (增強診斷)
+            grad_norms = []
+            avg_grad_norm = 0.0
+            if hasattr(self, 'opt'):
+                for param_group in self.opt.param_groups:
+                    for param in param_group['params']:
+                        if param.grad is not None:
+                            grad_norms.append(param.grad.norm().item())
+                
+                if grad_norms:
+                    avg_grad_norm = sum(grad_norms) / len(grad_norms)
+                    max_grad_norm = max(grad_norms)
+                    
+                    if self.tb_writer is not None:
+                        self.safe_tensorboard_log('NetworkHealth/Avg_Grad_Norm', avg_grad_norm, epoch_id)
+                        self.safe_tensorboard_log('NetworkHealth/Max_Grad_Norm', max_grad_norm, epoch_id)
+                    
+                    # 梯度異常警告
+                    if avg_grad_norm < 1e-6:
+                        self.logger.warning(f"🔻 梯度異常小: {avg_grad_norm:.2e} (可能梯度消失)")
+                    elif avg_grad_norm > 1e2:
+                        self.logger.warning(f"🔺 梯度異常大: {avg_grad_norm:.2e} (可能梯度爆炸)")
+            
+            # 輸出量級檢查
+            with torch.no_grad():
+                sample_input = torch.cat([self.x_f[:50], self.y_f[:50]], dim=1)
+                main_output = self.net(sample_input)
+                evm_output = self.net_1(sample_input)
+                
+                velocity_max = main_output[:, :2].abs().max().item()
+                evm_max = evm_output.abs().max().item()
+                
+                if self.tb_writer is not None:
+                    self.safe_tensorboard_log('NetworkHealth/Velocity_Output_Max', velocity_max, epoch_id)
+                    self.safe_tensorboard_log('NetworkHealth/EVM_Output_Max', evm_max, epoch_id)
+                
+                # 輸出異常警告
+                if velocity_max > 2.0:
+                    self.logger.warning(f"🌊 速度輸出過大: {velocity_max:.3f} (建議<2.0)")
+                if evm_max > 0.1:
+                    self.logger.warning(f"💨 EVM輸出過大: {evm_max:.3f} (建議<0.1)")
+            
+            # 整體健康狀態評估
+            health_issues = []
+            if avg_saturation > 0.3:
+                health_issues.append(f"高飽和率({avg_saturation*100:.1f}%)")
+            if hasattr(self, 'opt') and grad_norms:
+                if avg_grad_norm < 1e-6:
+                    health_issues.append("梯度消失")
+                elif avg_grad_norm > 1e2:
+                    health_issues.append("梯度爆炸")
+            if velocity_max > 2.0:
+                health_issues.append("速度輸出過大")
+            if evm_max > 0.1:
+                health_issues.append("EVM輸出過大")
+                
+            if health_issues:
+                self.logger.warning(f"🏥 網路健康警告: {'; '.join(health_issues)}")
+            else:
+                self.logger.info(f"✅ 網路健康狀態良好 (飽和率: {avg_saturation*100:.1f}%)")
+            
             if avg_saturation > 0.2:
                 self.logger.warning(f"🔥 平均飽和率: {avg_saturation*100:.1f}% (建議<20%)")
 
@@ -1030,10 +1100,10 @@ class PysicsInformedNeuralNetwork:
             if self.rank == 0:
                 self.epoch_start_time = time.time()
             
-            # 恢復原有的動態凍結邏輯
+            # 修改後的動態凍結邏輯：EVM在epoch 1-9999保持凍結
             if epoch_id != 0 and epoch_id % 10000 == 0:
                 self.defreeze_evm_net(epoch_id)
-            if (epoch_id - 1) % 10000 == 0:
+            if epoch_id > 10000 and (epoch_id - 1) % 10000 == 0:
                 self.freeze_evm_net(epoch_id)
 
             # 清除上一個epoch的梯度
@@ -1197,10 +1267,19 @@ class PysicsInformedNeuralNetwork:
                         memory_allocated = torch.cuda.memory_allocated(self.device) / 1024**3
                         self.safe_tensorboard_log('System/GPU_Memory_GB', memory_allocated, global_step)
                 
-                # 健康檢查 (每100個epoch檢查一次)
-
-
+                # 健康檢查 (初期密集監測 + 定期檢查)
+                should_monitor = False
+                if epoch_id <= 100 and epoch_id % 10 == 0:  # 前100個epoch密集監測
+                    should_monitor = True
+                elif epoch_id in [300000, 600000, 900000, 1200000, 1500000]:  # 階段轉換點
+                    should_monitor = True
+                elif epoch_id > 1000 and epoch_id % 50000 == 0:  # 定期檢查
+                    should_monitor = True
                 
+                if should_monitor:
+                    self.logger.info(f"🔍 Enhanced Health Check - Epoch {epoch_id}")
+                    self.check_tanh_saturation(epoch_id)
+
                 # 記憶體監控 (每50個epoch檢查一次)
 
             
