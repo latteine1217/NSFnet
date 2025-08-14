@@ -35,6 +35,13 @@ physics:
   bc_weight: 20.0
   eq_weight: 1.0
 
+supervision:
+  enabled: true
+  data_points: 1  # 测试时使用1个数据点
+  data_path: "data/cavity_Re5000_256_Uniform.mat"
+  weight: 1.0
+  random_seed: 42
+
 system:
   device: "auto"
   precision: "float32"

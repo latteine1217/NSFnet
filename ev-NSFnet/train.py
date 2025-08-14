@@ -130,6 +130,10 @@ def main():
             alpha_evm=config.physics.alpha_evm,
             bc_weight=config.physics.bc_weight,
             eq_weight=config.physics.eq_weight,
+            supervised_data_weight=config.supervision.weight if hasattr(config, 'supervision') else 1.0,
+            supervision_data_points=config.supervision.data_points if hasattr(config, 'supervision') else 0,
+            supervision_data_path=config.supervision.data_path if hasattr(config, 'supervision') else None,
+            supervision_random_seed=config.supervision.random_seed if hasattr(config, 'supervision') else 42,
             checkpoint_freq=config.training.checkpoint_freq
         )
         PINN.config = config
@@ -190,6 +194,39 @@ def main():
         xf = xf_cpu[f_start:f_end].to(PINN.device).contiguous().requires_grad_(True)
         yf = yf_cpu[f_start:f_end].to(PINN.device).contiguous().requires_grad_(True)
         PINN.set_eq_training_data(X=(xf, yf))
+
+        # 加载监督数据（如果启用）
+        if hasattr(config, 'supervision') and config.supervision.enabled and config.supervision.data_points > 0:
+            if rank == 0:
+                print(f"📊 载入监督数据: {config.supervision.data_points} 个数据点...")
+            
+            # 加载监督数据
+            x_sup, y_sup, u_sup, v_sup, p_sup = dataloader.loading_supervision_data(
+                config.supervision.data_path, 
+                config.supervision.data_points,
+                config.supervision.random_seed
+            )
+            
+            # 转换为tensor并移到GPU
+            if x_sup.shape[0] > 0:  # 确保有数据点
+                x_sup_tensor = torch.as_tensor(x_sup, dtype=torch.float32).to(PINN.device).requires_grad_(True)
+                y_sup_tensor = torch.as_tensor(y_sup, dtype=torch.float32).to(PINN.device).requires_grad_(True)
+                u_sup_tensor = torch.as_tensor(u_sup, dtype=torch.float32).to(PINN.device)
+                v_sup_tensor = torch.as_tensor(v_sup, dtype=torch.float32).to(PINN.device)
+                p_sup_tensor = torch.as_tensor(p_sup, dtype=torch.float32).to(PINN.device)
+                
+                # 设置监督数据到PINN
+                PINN.x_sup = x_sup_tensor
+                PINN.y_sup = y_sup_tensor
+                PINN.u_sup = u_sup_tensor
+                PINN.v_sup = v_sup_tensor
+                PINN.p_sup = p_sup_tensor
+                
+                if rank == 0:
+                    print(f"✅ 监督数据加载完成，监督点坐标: ({x_sup[0,0]:.4f}, {y_sup[0,0]:.4f})")
+        else:
+            if rank == 0:
+                print("📊 未启用监督数据或数据点数量为0")
 
         filename = f'./data/cavity_Re{config.physics.Re}_256_Uniform.mat'
         x_star, y_star, u_star, v_star, p_star = dataloader.loading_evaluate_data(filename)

@@ -67,6 +67,15 @@ class PhysicsConfig:
     eq_weight: float = 1.0             # 方程權重
 
 @dataclass
+class SupervisionConfig:
+    """监督数据配置"""
+    enabled: bool = True               # 是否启用监督数据
+    data_points: int = 0               # 监督数据点数量，0表示不使用
+    data_path: str = "data/cavity_Re5000_256_Uniform.mat"  # 数据文件路径
+    weight: float = 1.0                # 监督数据权重
+    random_seed: int = 42              # 随机种子，确保可重现性
+
+@dataclass
 class SystemConfig:
     """系統配置"""
     device: str = "auto"               # 設備選擇 (auto/cpu/cuda)
@@ -90,6 +99,7 @@ class ExperimentConfig:
     network: NetworkConfig = None
     training: TrainingConfig = None  
     physics: PhysicsConfig = None
+    supervision: SupervisionConfig = None
     system: SystemConfig = None
     
     def __post_init__(self):
@@ -100,6 +110,8 @@ class ExperimentConfig:
             self.training = TrainingConfig()
         if self.physics is None:
             self.physics = PhysicsConfig()
+        if self.supervision is None:
+            self.supervision = SupervisionConfig()
         if self.system is None:
             self.system = SystemConfig()
 
@@ -155,6 +167,8 @@ class ConfigManager:
                 self.config.training = TrainingConfig(**training_config)
         if 'physics' in config_dict:
             self.config.physics = PhysicsConfig(**config_dict['physics'])
+        if 'supervision' in config_dict:
+            self.config.supervision = SupervisionConfig(**config_dict['supervision'])
         if 'system' in config_dict:
             self.config.system = SystemConfig(**config_dict['system'])
             

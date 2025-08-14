@@ -82,6 +82,9 @@ class PysicsInformedNeuralNetwork:
                  num_outs=3,
                  num_outs_1=1,
                  supervised_data_weight=1,
+                 supervision_data_points=0,
+                 supervision_data_path=None,
+                 supervision_random_seed=42,
                  net_params=None,
                  net_params_1=None,
                  checkpoint_freq=2000):
@@ -152,6 +155,18 @@ class PysicsInformedNeuralNetwork:
         self.alpha_o = outlet_weight
         self.alpha_s = supervised_data_weight
         self.loss_i = self.loss_o = self.loss_b = self.loss_e = self.loss_s = 0.0
+
+        # 监督数据参数
+        self.supervision_data_points = supervision_data_points
+        self.supervision_data_path = supervision_data_path
+        self.supervision_random_seed = supervision_random_seed
+        
+        # 监督数据存储变量 (将在数据加载时初始化)
+        self.x_sup = None
+        self.y_sup = None
+        self.u_sup = None
+        self.v_sup = None  
+        self.p_sup = None
 
         # initialize NN
         self.net = self.initialize_NN(
@@ -701,6 +716,33 @@ class PysicsInformedNeuralNetwork:
             self.loss_eq4 = torch.mean(torch.square(self.eq4_pred.view(-1)))
             self.loss_e = self.loss_eq1 + self.loss_eq2 + self.loss_eq3 + 0.1 * self.loss_eq4
 
+        # supervision loss
+        if self.x_sup is not None and self.x_sup.shape[0] > 0:
+            # 计算监督点的预测值
+            (u_pred_sup, v_pred_sup, p_pred_sup, _) = self.neural_net_u(self.x_sup, self.y_sup)
+            
+            # 计算监督损失
+            if loss_mode == 'MSE':
+                u_sup_flat = self.u_sup.view(-1)
+                v_sup_flat = self.v_sup.view(-1)
+                p_sup_flat = self.p_sup.view(-1)
+                u_pred_sup_flat = u_pred_sup.view(-1)
+                v_pred_sup_flat = v_pred_sup.view(-1)
+                p_pred_sup_flat = p_pred_sup.view(-1)
+                
+                self.loss_s = torch.mean(torch.square(u_pred_sup_flat - u_sup_flat)) + \
+                              torch.mean(torch.square(v_pred_sup_flat - v_sup_flat)) + \
+                              torch.mean(torch.square(p_pred_sup_flat - p_sup_flat))
+        else:
+            # 没有监督数据时，设置损失为0但保持在计算图中
+            if hasattr(self.net, 'module'):
+                dummy_loss_net = torch.sum(self.net.module.layers[0].weight * 0.0)
+                dummy_loss_net1 = torch.sum(self.net_1.module.layers[0].weight * 0.0)
+            else:
+                dummy_loss_net = torch.sum(self.net.layers[0].weight * 0.0)
+                dummy_loss_net1 = torch.sum(self.net_1.layers[0].weight * 0.0)
+            self.loss_s = dummy_loss_net + dummy_loss_net1
+
         # 跨GPU聚合損失以獲得全局損失值
         if self.world_size > 1:
             # 聚合邊界損失 - 使用 detach() 避免 autograd 警告
@@ -713,15 +755,22 @@ class PysicsInformedNeuralNetwork:
             dist.all_reduce(loss_e_detached, op=dist.ReduceOp.SUM)
             loss_e_avg = loss_e_detached / self.world_size
             
+            # 聚合监督损失 - 使用 detach() 避免 autograd 警告
+            loss_s_detached = self.loss_s.detach()
+            dist.all_reduce(loss_s_detached, op=dist.ReduceOp.SUM)
+            loss_s_avg = loss_s_detached / self.world_size
+            
             # 用於日誌顯示的平均損失
             self.loss_b_avg = loss_b_avg
             self.loss_e_avg = loss_e_avg
+            self.loss_s_avg = loss_s_avg
         else:
             self.loss_b_avg = self.loss_b
             self.loss_e_avg = self.loss_e
+            self.loss_s_avg = self.loss_s
 
-        # 計算總損失（保持梯度追踪），確保兩個網路都參與
-        self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e
+        # 計算總損失（保持梯度追踪），包含监督损失
+        self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e + self.alpha_s * self.loss_s
 
         # 添加一個小的正則化項確保兩個網路都參與梯度計算
         # 這不會影響訓練結果，但確保DDP工作正常
@@ -749,8 +798,13 @@ class PysicsInformedNeuralNetwork:
             loss_b_log = self.loss_b_avg.detach().item()
         else:
             loss_b_log = self.loss_b.detach().item()
+            
+        if hasattr(self, 'loss_s_avg'):
+            loss_s_log = self.loss_s_avg.detach().item()
+        else:
+            loss_s_log = self.loss_s.detach().item()
 
-        return loss_for_backward, [loss_e_log, loss_b_log, self.loss_eq1.detach().item(), self.loss_eq2.detach().item(), self.loss_eq3.detach().item(), self.loss_eq4.detach().item()]
+        return loss_for_backward, [loss_e_log, loss_b_log, loss_s_log, self.loss_eq1.detach().item(), self.loss_eq2.detach().item(), self.loss_eq3.detach().item(), self.loss_eq4.detach().item()]
 
     def train(self,
               num_epoch=1,

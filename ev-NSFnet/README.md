@@ -17,8 +17,9 @@
 - **net.py**: 全連接神經網路定義  
 - **train.py**: 訓練主程式
 - **test.py**: 模型測試與評估
-- **cavity_data.py**: 腔體流數據處理
+- **cavity_data.py**: 腔體流數據處理與監督數據加載
 - **tools.py**: 工具函數
+- **config.py**: 配置管理系統，包含監督數據配置
 
 ### 網路結構
 - **主網路**: 6層隱藏層，80個神經元 (u, v, p預測)
@@ -183,7 +184,7 @@ Residual = (eq1×(u-0.5) + eq2×(v-0.5)) - e
 ev-NSFnet/
 ├── configs/                  # 配置文件
 │   ├── production.yaml       # 生產環境配置
-│   └── test.yaml            # 測試環境配置
+│   └── test.yaml            # 測試環境配置（含監督數據示例）
 ├── data/                     # 訓練數據
 │   ├── cavity_Re3000_256_Uniform.mat
 │   └── cavity_Re5000_256_Uniform.mat
@@ -194,8 +195,56 @@ ev-NSFnet/
 ├── train.py                 # 訓練腳本
 ├── test.py                  # 測試腳本
 ├── train.sh                 # SLURM訓練腳本
+├── cavity_data.py           # 數據處理與監督數據加載
 └── README.md               # 說明文件
 ```
+
+## 📊 監督數據功能 (新增) 🎯
+
+**功能概述**: 將傳統的**純物理約束PINN**升級為**物理-數據混合約束PINN**，支援從真實CFD數據中隨機採樣指定數量的監督點作為額外損失項。
+
+**應用場景**: 
+- 模擬真實PINN應用中**數據極度稀缺**的情況
+- 研究少量監督數據對PINN性能的影響  
+- 探索物理約束與數據約束的平衡策略
+
+### 🔧 配置參數
+
+```yaml
+supervision:
+  enabled: true                    # 啟用/禁用監督數據功能
+  data_points: 1                   # 監督數據點數量 (0=純物理約束)
+  data_path: "data/cavity_Re5000_256_Uniform.mat"  # CFD數據文件路徑
+  weight: 1.0                      # 監督損失權重
+  random_seed: 42                  # 隨機採樣種子，確保可重現性
+```
+
+### ⚡ 使用示例
+
+```bash
+# 純物理約束訓練 (默認配置)
+python train.py --config configs/production.yaml
+
+# 1個監督點的混合約束訓練
+python train.py --config configs/test.yaml
+
+# 自定義監督點數量
+# 修改configs/production.yaml中的supervision.data_points參數
+```
+
+### 🏗️ 技術實現
+
+- **數據加載**: `cavity_data.py::loading_supervision_data()` - 支援隨機採樣指定數量的監督點
+- **損失集成**: `pinn_solver.py::fwd_computing_loss_2d()` - 監督損失`loss_s`完全集成到總損失計算
+- **分布式支援**: 支援多GPU訓練環境下的監督損失聚合
+- **配置管理**: `config.py::SupervisionConfig` - 統一的監督數據配置管理
+
+### 📈 預期效果
+
+- **收斂加速**: 少量真實數據點可顯著提升訓練初期的收斂速度
+- **精度改善**: 在關鍵區域提供額外約束，改善整體求解精度
+- **穩定性增強**: 減少陷入局部最優解的風險
+- **研究價值**: 為數據稀缺環境下的PINN性能研究提供工具
 
 ## 🔬 實驗結果
 
@@ -277,11 +326,11 @@ training:
 
 ```bash
 ```bash
-# 使用配置文件訓練
-python train.py --config configs/production.yaml
-
-# 使用測試配置
+# 使用測試配置 (含1個監督點)
 python train.py --config configs/test.yaml
+
+# 純物理約束訓練 (默認配置)
+python train.py --config configs/production.yaml
 
 # 完整訓練 (1.8M epochs)
 python train.py

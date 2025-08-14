@@ -106,4 +106,59 @@ class DataLoader:
         v_star = v.reshape(-1,1)
         p_star = p.reshape(-1,1)
         return x_star, y_star, u_star, v_star, p_star
+
+    def loading_supervision_data(self, filename, num_points=1, random_seed=42):
+        """
+        从真实数据中随机采样固定数量的监督点
+        
+        Args:
+            filename: .mat文件路径
+            num_points: 采样点数量，默认1个点
+            random_seed: 随机种子，确保可重现性
+        
+        Returns:
+            x_sup, y_sup, u_sup, v_sup, p_sup: 监督数据点的坐标和物理量
+        """
+        if num_points <= 0:
+            # 返回空张量，但保持正确的维度
+            empty_tensor = np.empty((0, 1))
+            return empty_tensor, empty_tensor, empty_tensor, empty_tensor, empty_tensor
+        
+        # 设置随机种子确保可重现性
+        np.random.seed(random_seed)
+        
+        # 加载数据
+        data = scipy.io.loadmat(filename)
+        x = data['X_ref']
+        y = data['Y_ref']  
+        u = data['U_ref']
+        v = data['V_ref']
+        p = data['P_ref']
+        
+        # 展平数据
+        x_flat = x.reshape(-1)
+        y_flat = y.reshape(-1)
+        u_flat = u.reshape(-1)
+        v_flat = v.reshape(-1)
+        p_flat = p.reshape(-1)
+        
+        # 随机采样指定数量的点
+        total_points = x_flat.shape[0]
+        indices = np.random.choice(total_points, size=num_points, replace=False)
+        
+        # 提取采样点数据
+        x_sup = x_flat[indices].reshape(-1, 1)
+        y_sup = y_flat[indices].reshape(-1, 1)
+        u_sup = u_flat[indices].reshape(-1, 1)
+        v_sup = v_flat[indices].reshape(-1, 1)
+        p_sup = p_flat[indices].reshape(-1, 1)
+        
+        print(f'-----------------------------')
+        print(f'Supervision data loaded: {num_points} points')
+        if num_points > 0:
+            print(f'Sample point coordinates: x={x_sup[0,0]:.4f}, y={y_sup[0,0]:.4f}')
+            print(f'Sample point values: u={u_sup[0,0]:.4f}, v={v_sup[0,0]:.4f}, p={p_sup[0,0]:.4f}')
+        print(f'-----------------------------')
+        
+        return x_sup, y_sup, u_sup, v_sup, p_sup
     
