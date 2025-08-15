@@ -68,8 +68,8 @@ class FCNet(torch.nn.Module):
             nn.init.zeros_(layer.bias)
             
             if i == 0:
-                # 首層: 溫和縮放，避免輸入飽和
-                layer.weight.data.mul_(0.6) 
+                # 首層: 調整縮放，避免輸入飽和
+                layer.weight.data.mul_(1.0) 
             elif i == len(layers_list) - 1:
                 # 末層: 基於物理量級設計
                 is_evm = (layer.out_features == 1)
@@ -77,8 +77,8 @@ class FCNet(torch.nn.Module):
                     # EVM: 初始值應接近alpha_evm初始值
                     scale = 1   # 調整EVM網路初始化縮放因子
                 else:
-                    # 主網路: 初始值應為物理量級的10-20%
-                    scale = 0.5   # 1e-3 → 0.1
+                    # 主網路: 初始值應為物理量級
+                    scale = 1
                 layer.weight.data.mul_(scale)
 
     def forward(self, x):

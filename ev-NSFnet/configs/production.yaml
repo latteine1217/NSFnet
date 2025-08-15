@@ -41,9 +41,9 @@ physics:
 
 supervision:
   enabled: true
-  data_points: 0  # 数据监督点数量，0表示不使用监督数据
+  data_points: 1  # 数据监督点数量，0表示不使用监督数据
   data_path: "data/cavity_Re5000_256_Uniform.mat"
-  weight: 1.0     # 监督数据权重
+  weight: 5.0     # 监督数据权重
   random_seed: 42 # 确保可重现性
 
 system:
