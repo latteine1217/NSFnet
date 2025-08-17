@@ -143,7 +143,12 @@ def main():
             print("📁 載入訓練數據...")
         
         path = './data/'
-        dataloader = cavity.DataLoader(path=path, N_f=config.training.N_f, N_b=1000)
+        dataloader = cavity.DataLoader(
+            path=path,
+            N_f=config.training.N_f,
+            N_b=1000,
+            sort_by_boundary_distance=getattr(config.training, 'sort_by_boundary_distance', True)
+        )
 
         # Set boundary data, | u, v, x, y
         boundary_np = dataloader.loading_boundary_data()
@@ -209,8 +214,9 @@ def main():
             
             # 转换为tensor并移到GPU
             if x_sup.shape[0] > 0:  # 确保有数据点
-                x_sup_tensor = torch.as_tensor(x_sup, dtype=torch.float32).to(PINN.device).requires_grad_(True)
-                y_sup_tensor = torch.as_tensor(y_sup, dtype=torch.float32).to(PINN.device).requires_grad_(True)
+                # 監督座標不需要梯度，只需讓網路權重反向即可
+                x_sup_tensor = torch.as_tensor(x_sup, dtype=torch.float32).to(PINN.device)
+                y_sup_tensor = torch.as_tensor(y_sup, dtype=torch.float32).to(PINN.device)
                 u_sup_tensor = torch.as_tensor(u_sup, dtype=torch.float32).to(PINN.device)
                 v_sup_tensor = torch.as_tensor(v_sup, dtype=torch.float32).to(PINN.device)
                 p_sup_tensor = torch.as_tensor(p_sup, dtype=torch.float32).to(PINN.device)

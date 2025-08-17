@@ -22,7 +22,7 @@ from tools import *
 
 
 class DataLoader:
-    def __init__(self, path=None, N_f=20000, N_b=1000):
+    def __init__(self, path=None, N_f=20000, N_b=1000, sort_by_boundary_distance: bool = True):
 
         '''
         N_f: Num of residual points
@@ -35,6 +35,7 @@ class DataLoader:
         self.y_max = 1.0
         self.N_f = N_f # equation points
         self.pts_bc = None
+        self.sort_by_boundary_distance = sort_by_boundary_distance
 
     def loading_boundary_data(self):
         # boundary points
@@ -81,13 +82,14 @@ class DataLoader:
         #x_train_f = x_star[idx,:]
         #y_train_f = y_star[idx,:]
         xye = LHSample(2, [[self.x_min, self.x_max], [self.y_min, self.y_max]], self.N_f)
-        #sampler = qmc.Halton(d=2)
-        #xye = sampler.random(n=N_f)
-        if self.pts_bc is not None:
+        if self.pts_bc is None:
+            print("need to load boundary data first!")
+            raise
+        if self.sort_by_boundary_distance:
             xye_sorted, _ = sort_pts(xye, self.pts_bc)
         else:
-            print("need to load boundary data first!")
-            raise 
+            # 跳過距離排序，直接使用LHS樣本
+            xye_sorted = xye
         x_train_f = xye_sorted[:, 0:1]
         y_train_f = xye_sorted[:, 1:2]
         return x_train_f, y_train_f

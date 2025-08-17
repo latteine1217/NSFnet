@@ -320,6 +320,35 @@ training:
 
 推薦使用`CosineAnnealingLR`以獲得更平滑和有效的學習率衰減策略。
 
+### 系統穩定性與效能優化 (2025-08-17)
+
+#### 🔧 系統穩定性改進
+- **Logger 初始化順序**: 提前初始化 `self.logger`，避免在設定 device 時未初始化就呼叫
+- **監督座標 requires_grad 移除**: `train.py` 將 `x_sup/y_sup` 不再 `requires_grad_(True)`，減少額外梯度計算耗時
+- **TensorBoard/Console 指標索引對齊**: 新增 `Loss/Supervised`，修正 `eq1..eq4` 的索引映射；console 輸出同步修正
+- **Epoch 時間量測修正**: 在 epoch 起訖處加 `torch.cuda.synchronize()`（rank 0）以取得準確時間
+
+#### ⚡ 分散式訓練效能優化
+- **DDP 指標聚合**: 將三個 loss 的 `all_reduce` 合併為單次；並改成 `dist.reduce(..., dst=0)` 只聚合到 rank 0
+- **DDP 正則化避免 stack 分配**: 將 `torch.stack([...])` 換成生成器 `sum(p.pow(2).sum() for p in params)`
+
+#### 🎯 邊界層物理改進
+- **PDE 距離權重 w(d)**: 在 `pinn_solver.py` 的 PDE 殘差 loss 上加入 `w(d)`
+  - 距離定義: `d = min(x, 1-x, y, 1-y)`
+  - 權重公式: `w = w_min + (1-w_min) * exp(-d/tau)`
+  - 自動 mean 正規化、detach，與網路結構、EVM 機制、DDP 完全兼容
+  - 配置: `training.pde_distance_weighting=true` (預設啟用)
+
+#### 🔄 採樣效能優化
+- **採樣距離排序開關**: DataLoader 增加 `sort_by_boundary_distance` 參數
+- **配置整合**: `train.py` 從 config 傳入；`production.yaml` 預設設為 `false`（配合 w(d) 節省前處理時間）
+- **向下相容**: 與舊呼叫點相容（有預設值）；`test.py`/`batch_size_test` 等使用舊介面無需調整
+
+#### ⚠️ 重要注意事項
+- **邊界層權重邏輯**: 目前假設域為 [0,1]²。若未來更改域邊界，需同步調整距離定義
+- **採樣排序效能**: 保留距離排序功能但預設關閉。若開啟，現行 `tools.sort_pts` 為 O(N_f×N_bc) 實作
+- **Freeze/Unfreeze 規劃**: 既有邏輯在第 10000 epoch 解凍、10001 重新凍結，net_1 幾乎總是凍結（非本次修改造成）
+
 ---
 
 ## 🛠️ 命令參考

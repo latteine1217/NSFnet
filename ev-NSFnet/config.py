@@ -36,6 +36,10 @@ class TrainingConfig:
     N_f: int = 120000                  # 方程點數量
     batch_size: Optional[int] = None   # 批次大小 (None = 全批次)
     checkpoint_freq: int = 5000        # 檢查點保存頻率
+    sort_by_boundary_distance: bool = True  # 是否按距離邊界遠近排序方程點
+    pde_distance_weighting: bool = True     # 是否啟用PDE距離權重 w(d)
+    pde_distance_w_min: float = 0.2         # 權重下限，避免遠區權重為0
+    pde_distance_tau: float = 0.1           # 指數權重尺度參數 tau
     
     # 訓練階段配置 (alpha_evm, epochs, learning_rate[, scheduler])
     training_stages: List = None
@@ -256,6 +260,8 @@ class ConfigManager:
         print(f"🎯 訓練設定:")
         print(f"   方程點數: {self.config.training.N_f:,}")
         print(f"   批次大小: {'全批次' if self.config.training.batch_size is None else self.config.training.batch_size}")
+        print(f"   依距離排序: {'是' if self.config.training.sort_by_boundary_distance else '否'}")
+        print(f"   PDE距離權重: {'啟用' if self.config.training.pde_distance_weighting else '關閉'} (w_min={self.config.training.pde_distance_w_min}, tau={self.config.training.pde_distance_tau})")
         print(f"   總階段數: {len(self.config.training.training_stages)}")
         for i, st in enumerate(self.config.training.training_stages):
             try:

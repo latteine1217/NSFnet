@@ -88,11 +88,17 @@ class PysicsInformedNeuralNetwork:
                  net_params=None,
                  net_params_1=None,
                  checkpoint_freq=2000):
-
-        # Initialize distributed training
+        # Initialize distributed training identifiers first
         self.rank = int(os.environ.get('RANK', 0))
         self.local_rank = int(os.environ.get('LOCAL_RANK', 0))
         self.world_size = int(os.environ.get('WORLD_SIZE', 1))
+
+        # Initialize logger ASAP to avoid use-before-init warnings
+        self.logger = LoggerFactory.get_logger(
+            name=f"PINN_Re{Re}",
+            level="INFO",
+            rank=self.rank
+        )
 
         # Set device for current process
         if torch.cuda.is_available():
@@ -121,13 +127,6 @@ class PysicsInformedNeuralNetwork:
         self.current_stage = ' '
 
         self.checkpoint_freq = checkpoint_freq
-
-        # 日誌系統設定
-        self.logger = LoggerFactory.get_logger(
-            name=f"PINN_Re{Re}",
-            level="INFO",
-            rank=self.rank
-        )
 
         # TensorBoard設定
         if self.rank == 0:  # 只在主進程創建TensorBoard writer
@@ -710,10 +709,44 @@ class PysicsInformedNeuralNetwork:
         (self.eq1_pred, self.eq2_pred, self.eq3_pred, self.eq4_pred) = self.neural_net_equations(self.x_f, self.y_f)
     
         if loss_mode == 'MSE':
-            self.loss_eq1 = torch.mean(torch.square(self.eq1_pred.view(-1)))
-            self.loss_eq2 = torch.mean(torch.square(self.eq2_pred.view(-1)))
-            self.loss_eq3 = torch.mean(torch.square(self.eq3_pred.view(-1)))
-            self.loss_eq4 = torch.mean(torch.square(self.eq4_pred.view(-1)))
+            # 距離權重 w(d)：提升靠近邊界點的PDE殘差權重
+            enable_weight = True
+            w_min = 0.2
+            tau = 0.1
+            if hasattr(self, 'config') and hasattr(self.config, 'training'):
+                tr = self.config.training
+                enable_weight = getattr(tr, 'pde_distance_weighting', True)
+                w_min = float(getattr(tr, 'pde_distance_w_min', 0.2))
+                tau = float(getattr(tr, 'pde_distance_tau', 0.1))
+
+            if enable_weight:
+                # d = min(x, 1-x, y, 1-y) on [0,1]^2
+                d_x = torch.minimum(self.x_f, 1.0 - self.x_f)
+                d_y = torch.minimum(self.y_f, 1.0 - self.y_f)
+                d = torch.minimum(d_x, d_y)
+                w = w_min + (1.0 - w_min) * torch.exp(-d / max(tau, 1e-6))
+                # 規模穩定：不對w做梯度，並做均值歸一以保持量級穩定
+                w = (w / (w.mean() + 1e-12)).detach()
+            else:
+                w = 1.0
+
+            eq1_sq = torch.square(self.eq1_pred.view(-1))
+            eq2_sq = torch.square(self.eq2_pred.view(-1))
+            eq3_sq = torch.square(self.eq3_pred.view(-1))
+            eq4_sq = torch.square(self.eq4_pred.view(-1))
+
+            if isinstance(w, torch.Tensor):
+                w_flat = w.view(-1)
+                self.loss_eq1 = torch.mean(w_flat * eq1_sq)
+                self.loss_eq2 = torch.mean(w_flat * eq2_sq)
+                self.loss_eq3 = torch.mean(w_flat * eq3_sq)
+                self.loss_eq4 = torch.mean(w_flat * eq4_sq)
+            else:
+                self.loss_eq1 = torch.mean(eq1_sq)
+                self.loss_eq2 = torch.mean(eq2_sq)
+                self.loss_eq3 = torch.mean(eq3_sq)
+                self.loss_eq4 = torch.mean(eq4_sq)
+
             self.loss_e = self.loss_eq1 + self.loss_eq2 + self.loss_eq3 + 0.1 * self.loss_eq4
 
         # supervision loss
@@ -743,27 +776,25 @@ class PysicsInformedNeuralNetwork:
                 dummy_loss_net1 = torch.sum(self.net_1.layers[0].weight * 0.0)
             self.loss_s = dummy_loss_net + dummy_loss_net1
 
-        # 跨GPU聚合損失以獲得全局損失值
+        # 跨GPU聚合損失以獲得全局損失值（僅用於日誌：使用 reduce 匯總到 rank 0）
         if self.world_size > 1:
-            # 聚合邊界損失 - 使用 detach() 避免 autograd 警告
-            loss_b_detached = self.loss_b.detach()
-            dist.all_reduce(loss_b_detached, op=dist.ReduceOp.SUM)
-            loss_b_avg = loss_b_detached / self.world_size
-            
-            # 聚合方程損失 - 使用 detach() 避免 autograd 警告  
-            loss_e_detached = self.loss_e.detach()
-            dist.all_reduce(loss_e_detached, op=dist.ReduceOp.SUM)
-            loss_e_avg = loss_e_detached / self.world_size
-            
-            # 聚合监督损失 - 使用 detach() 避免 autograd 警告
-            loss_s_detached = self.loss_s.detach()
-            dist.all_reduce(loss_s_detached, op=dist.ReduceOp.SUM)
-            loss_s_avg = loss_s_detached / self.world_size
-            
-            # 用於日誌顯示的平均損失
-            self.loss_b_avg = loss_b_avg
-            self.loss_e_avg = loss_e_avg
-            self.loss_s_avg = loss_s_avg
+            loss_vec = torch.stack([
+                self.loss_b.detach(),
+                self.loss_e.detach(),
+                self.loss_s.detach()
+            ])
+            dist.reduce(loss_vec, dst=0, op=dist.ReduceOp.SUM)
+            if self.rank == 0:
+                loss_vec = loss_vec / self.world_size
+                # 用於日誌顯示的平均損失（rank 0）
+                self.loss_b_avg = loss_vec[0]
+                self.loss_e_avg = loss_vec[1]
+                self.loss_s_avg = loss_vec[2]
+            else:
+                # 非rank 0不需要全域平均，保留本地值供必要時使用
+                self.loss_b_avg = self.loss_b
+                self.loss_e_avg = self.loss_e
+                self.loss_s_avg = self.loss_s
         else:
             self.loss_b_avg = self.loss_b
             self.loss_e_avg = self.loss_e
@@ -777,12 +808,16 @@ class PysicsInformedNeuralNetwork:
         if self.world_size > 1:
             regularization_weight = 1e-8
             if hasattr(self.net, 'module'):
-                net_reg = torch.sum(torch.stack([torch.sum(p**2) for p in self.net.module.parameters()]))
-                net1_reg = torch.sum(torch.stack([torch.sum(p**2) for p in self.net_1.module.parameters()]))
+                params_main = self.net.module.parameters()
+                params_evm = self.net_1.module.parameters()
             else:
-                net_reg = torch.sum(torch.stack([torch.sum(p**2) for p in self.net.parameters()]))
-                net1_reg = torch.sum(torch.stack([torch.sum(p**2) for p in self.net_1.parameters()]))
-            
+                params_main = self.net.parameters()
+                params_evm = self.net_1.parameters()
+
+            # 使用生成器避免建立中間list與stack，減少記憶體與運算開銷
+            net_reg = sum(p.pow(2).sum() for p in params_main)
+            net1_reg = sum(p.pow(2).sum() for p in params_evm)
+
             self.loss = self.loss + regularization_weight * (net_reg + net1_reg)
 
         # 創建用於backward的loss（保持梯度）
@@ -1150,8 +1185,13 @@ class PysicsInformedNeuralNetwork:
             self.last_strategy_step = -999999
         
         for epoch_id in range(start_epoch, num_epoch):
-            # 記錄epoch開始時間
+            # 記錄epoch開始時間（同步GPU以避免非同步誤差）
             if self.rank == 0:
+                if torch.cuda.is_available():
+                    try:
+                        torch.cuda.synchronize(self.device)
+                    except Exception:
+                        pass
                 self.epoch_start_time = time.time()
             
             # 修改後的動態凍結邏輯：EVM在epoch 1-9999保持凍結
@@ -1291,8 +1331,13 @@ class PysicsInformedNeuralNetwork:
             if profiler:
                 profiler.step()
 
-            # 時間追蹤和預估（只在rank 0執行）
+            # 時間追蹤和預估（只在rank 0執行；同步GPU以獲得準確時間）
             if self.rank == 0:
+                if torch.cuda.is_available():
+                    try:
+                        torch.cuda.synchronize(self.device)
+                    except Exception:
+                        pass
                 epoch_end_time = time.time()
                 epoch_time = epoch_end_time - self.epoch_start_time
                 
@@ -1301,17 +1346,18 @@ class PysicsInformedNeuralNetwork:
                 if len(self.epoch_times) > 1000:  # 只保留最近1000個epoch的時間
                     self.epoch_times = self.epoch_times[-500:]  # 刪除一半舊數據，保持高效
                 
-                # 記錄到TensorBoard
+                # 記錄到TensorBoard（修正索引並新增監督損失）
                 if self.tb_writer is not None:
                     global_step = self.global_step_offset + epoch_id
                     
                     self.safe_tensorboard_log('Loss/Total', epoch_loss, global_step)
                     self.safe_tensorboard_log('Loss/Equation_Combined', epoch_losses[0], global_step)
                     self.safe_tensorboard_log('Loss/Boundary', epoch_losses[1], global_step)
-                    self.safe_tensorboard_log('Loss/Equation_NS_X', epoch_losses[2], global_step)
-                    self.safe_tensorboard_log('Loss/Equation_NS_Y', epoch_losses[3], global_step)
-                    self.safe_tensorboard_log('Loss/Equation_Continuity', epoch_losses[4], global_step)
-                    self.safe_tensorboard_log('Loss/Equation_EntropyResidual', epoch_losses[5], global_step)
+                    self.safe_tensorboard_log('Loss/Supervised', epoch_losses[2], global_step)
+                    self.safe_tensorboard_log('Loss/Equation_NS_X', epoch_losses[3], global_step)
+                    self.safe_tensorboard_log('Loss/Equation_NS_Y', epoch_losses[4], global_step)
+                    self.safe_tensorboard_log('Loss/Equation_Continuity', epoch_losses[5], global_step)
+                    self.safe_tensorboard_log('Loss/Equation_EntropyResidual', epoch_losses[6], global_step)
                     self.safe_tensorboard_log('Training/LearningRate', self.opt.param_groups[0]['lr'], global_step)
                     self.safe_tensorboard_log('Training/EpochTime', epoch_time, global_step)
                     self.safe_tensorboard_log('Training/Alpha_EVM', self.alpha_evm, global_step)
@@ -1690,11 +1736,12 @@ class PysicsInformedNeuralNetwork:
             print(f"\n📈 損失狀況:")
             print(f"   總損失:   {loss:.3e} {convergence_info['trend_symbol']}")
             print(f"   方程總損失: {losses[0]:.3e}")
-            print(f"   Navier-Stokes X損失: {losses[2]:.3e}")
-            print(f"   Navier-Stokes Y損失: {losses[3]:.3e}")
-            print(f"   連續性方程損失: {losses[4]:.3e}")
-            print(f"   熵殘差損失: {losses[5]:.3e}")
+            print(f"   監督損失: {losses[2]:.3e}")
             print(f"   邊界損失: {losses[1]:.3e}")
+            print(f"   Navier-Stokes X損失: {losses[3]:.3e}")
+            print(f"   Navier-Stokes Y損失: {losses[4]:.3e}")
+            print(f"   連續性方程損失: {losses[5]:.3e}")
+            print(f"   熵殘差損失: {losses[6]:.3e}")
             print(f"   收斂趨勢: {convergence_info['description']}")
             
             # 時間分析
@@ -1745,7 +1792,7 @@ class PysicsInformedNeuralNetwork:
             print(f"🔥 {self.current_stage} - 初始化階段")
             print(f"   Epoch: {epoch_id + 1:,} / {num_epoch:,}")
             print(f"   學習率: {current_lr:.2e} | 資料點: {data_points:,}")
-            print(f"   損失 - 總: {loss:.3e} | 方程: {losses[0]:.3e} | 邊界: {losses[1]:.3e}")
+            print(f"   損失 - 總: {loss:.3e} | 方程: {losses[0]:.3e} | 監督: {losses[2]:.3e} | 邊界: {losses[1]:.3e}")
             
             # 物理參數診斷 - 計算等效雷諾數
             vis_t_mean = getattr(self, 'vis_t', torch.tensor(0.0)).mean().item()
@@ -1801,8 +1848,8 @@ class PysicsInformedNeuralNetwork:
     def print_log_full_batch(self, loss, losses, epoch_id, num_epoch, data_points):
         current_lr = self.opt.param_groups[0]['lr']
         print('current lr is {}'.format(current_lr))
-        print('epoch/num_epoch: {:6d} / {:d} data_points: {:d} avg_loss[Adam]: {:.3e} avg_eq_combined_loss: {:.3e} avg_eq1_loss: {:.3e} avg_eq2_loss: {:.3e} avg_eq3_loss: {:.3e} avg_eq4_loss: {:.3e} avg_bc_loss: {:.3e}'.format(
-            epoch_id + 1, num_epoch, data_points, loss, losses[0], losses[2], losses[3], losses[4], losses[5], losses[1]))
+        print('epoch/num_epoch: {:6d} / {:d} data_points: {:d} avg_loss[Adam]: {:.3e} avg_eq_combined_loss: {:.3e} avg_bc_loss: {:.3e} avg_sup_loss: {:.3e} avg_eq1_loss: {:.3e} avg_eq2_loss: {:.3e} avg_eq3_loss: {:.3e} avg_eq4_loss: {:.3e}'.format(
+            epoch_id + 1, num_epoch, data_points, loss, losses[0], losses[1], losses[2], losses[3], losses[4], losses[5], losses[6]))
 
     def print_log_batch(self, loss, losses, epoch_id, num_epoch, batch_size, steps_per_epoch):
         def get_lr(optimizer):
@@ -1817,11 +1864,12 @@ class PysicsInformedNeuralNetwork:
               "coverage: {:.1f}%".format(coverage_percent),
               "avg_loss[Adam]: %.3e" %(loss),
               "avg_eq_combined_loss: %.3e" %(losses[0] if len(losses) > 0 else 0),
-              "avg_eq1_loss: %.3e" %(losses[2] if len(losses) > 2 else 0),
-              "avg_eq2_loss: %.3e" %(losses[3] if len(losses) > 3 else 0),
-              "avg_eq3_loss: %.3e" %(losses[4] if len(losses) > 4 else 0),
-              "avg_eq4_loss: %.3e" %(losses[5] if len(losses) > 5 else 0),
-              "avg_bc_loss: %.3e" %(losses[1] if len(losses) > 1 else 0))
+              "avg_bc_loss: %.3e" %(losses[1] if len(losses) > 1 else 0),
+              "avg_sup_loss: %.3e" %(losses[2] if len(losses) > 2 else 0),
+              "avg_eq1_loss: %.3e" %(losses[3] if len(losses) > 3 else 0),
+              "avg_eq2_loss: %.3e" %(losses[4] if len(losses) > 4 else 0),
+              "avg_eq3_loss: %.3e" %(losses[5] if len(losses) > 5 else 0),
+              "avg_eq4_loss: %.3e" %(losses[6] if len(losses) > 6 else 0))
 
     def print_log(self, loss, losses, epoch_id, num_epoch):
         def get_lr(optimizer):
@@ -1830,14 +1878,14 @@ class PysicsInformedNeuralNetwork:
 
         print("current lr is {}".format(get_lr(self.opt)))
         print("epoch/num_epoch: ", epoch_id + 1, "/", num_epoch,
-              "loss[Adam]: %.3e"
-              %(loss.detach().cpu().item()),
-              "eq_combined_loss: %.3e " %(losses[0]),
-              "eq1_loss: %.3e " %(losses[2]),
-              "eq2_loss: %.3e " %(losses[3]),
-              "eq3_loss: %.3e " %(losses[4]),
-              "eq4_loss: %.3e " %(losses[5]),
-              "bc_loss: %.3e" %(losses[1]))
+              "loss[Adam]: %.3e" %(loss.detach().cpu().item()),
+              "eq_combined_loss: %.3e" %(losses[0]),
+              "bc_loss: %.3e" %(losses[1]),
+              "sup_loss: %.3e" %(losses[2]),
+              "eq1_loss: %.3e" %(losses[3]),
+              "eq2_loss: %.3e" %(losses[4]),
+              "eq3_loss: %.3e" %(losses[5]),
+              "eq4_loss: %.3e" %(losses[6]))
 
     def evaluate(self, x, y, u, v, p):
         """ testing all points in the domain """
