@@ -1185,9 +1185,25 @@ class PysicsInformedNeuralNetwork:
             self.last_strategy_step = -999999
         
         for epoch_id in range(start_epoch, num_epoch):
-            # 記錄epoch開始時間（同步GPU以避免非同步誤差）
+            # 記錄epoch開始時間（僅在需要精確計時時同步GPU）
             if self.rank == 0:
-                if torch.cuda.is_available():
+                # 確定是否需要精確計時
+                need_precise_timing = (
+                    epoch_id % 100 == 0 or               # 每100 epochs進行時間預估
+                    epoch_id == 0 or                     # 首個epoch
+                    epoch_id == num_epoch - 1 or         # 最後epoch
+                    (epoch_id + 1) % 1000 == 0           # console輸出時需要精確時間
+                )
+                
+                if need_precise_timing and torch.cuda.is_available():
+                    try:
+                        torch.cuda.synchronize(self.device)
+                    except Exception:
+                        pass
+                self.epoch_start_time = time.time()
+                )
+                
+                if need_precise_timing and torch.cuda.is_available():
                     try:
                         torch.cuda.synchronize(self.device)
                     except Exception:
@@ -1315,15 +1331,23 @@ class PysicsInformedNeuralNetwork:
                 if self.rank == 0:
                     print("✅ 離開 L-BFGS 段，恢復 Adam")
                 self.opt = torch.optim.Adam(list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters()), lr=current_lr, weight_decay=0.0)
+            # 時間追蹤和預估（只在rank 0執行；僅在需要精確計時時同步GPU）
+            if self.rank == 0:
+                # 確定是否需要精確計時（與開始時相同的邏輯）
+                need_precise_timing = (
+                    epoch_id % 100 == 0 or               # 每100 epochs進行時間預估
+                    epoch_id == 0 or                     # 首個epoch
+                    epoch_id == num_epoch - 1 or         # 最後epoch
+                    (epoch_id + 1) % 1000 == 0           # console輸出時需要精確時間
+                )
                 
-                # 确保有initial_lr参数
-                for group in self.opt.param_groups:
-                    group['initial_lr'] = current_lr
-                
-                # 關鍵修復：L-BFGS結束後必須重建scheduler
-                self._rebuild_scheduler()
-                if self.rank == 0:
-                    scheduler_status = "重建成功" if self.current_scheduler is not None else "重建失敗"  
+                if need_precise_timing and torch.cuda.is_available():
+                    try:
+                        torch.cuda.synchronize(self.device)
+                    except Exception:
+                        pass
+                epoch_end_time = time.time()
+                epoch_time = epoch_end_time - self.epoch_start_time
                     print(f"🔧 Scheduler {scheduler_status}")
                 
                 self.last_strategy_step = self.stage_step
@@ -1331,9 +1355,27 @@ class PysicsInformedNeuralNetwork:
             if profiler:
                 profiler.step()
 
-            # 時間追蹤和預估（只在rank 0執行；同步GPU以獲得準確時間）
+            # 時間追蹤和預估（只在rank 0執行；僅在需要精確計時時同步GPU）
             if self.rank == 0:
-                if torch.cuda.is_available():
+                # 健康檢查條件判斷 (需要提前以確定是否需要精確計時)
+                should_monitor = False
+                if epoch_id <= 100 and epoch_id % 10 == 0:  # 前100個epoch密集監測
+                    should_monitor = True
+                elif epoch_id in [300000, 600000, 900000, 1200000, 1500000]:  # 階段轉換點
+                    should_monitor = True
+                elif epoch_id > 1000 and epoch_id % 50000 == 0:  # 定期檢查
+                    should_monitor = True
+                
+                # 確定是否需要精確計時
+                need_precise_timing = (
+                    epoch_id % 100 == 0 or               # 每100 epochs進行時間預估
+                    epoch_id == 0 or                     # 首個epoch
+                    epoch_id == num_epoch - 1 or         # 最後epoch
+                    (epoch_id + 1) % 1000 == 0 or        # console輸出時需要精確時間
+                    should_monitor                       # 健康檢查時
+                )
+                
+                if need_precise_timing and torch.cuda.is_available():
                     try:
                         torch.cuda.synchronize(self.device)
                     except Exception:
@@ -1368,14 +1410,6 @@ class PysicsInformedNeuralNetwork:
                         self.safe_tensorboard_log('System/GPU_Memory_GB', memory_allocated, global_step)
                 
                 # 健康檢查 (初期密集監測 + 定期檢查)
-                should_monitor = False
-                if epoch_id <= 100 and epoch_id % 10 == 0:  # 前100個epoch密集監測
-                    should_monitor = True
-                elif epoch_id in [300000, 600000, 900000, 1200000, 1500000]:  # 階段轉換點
-                    should_monitor = True
-                elif epoch_id > 1000 and epoch_id % 50000 == 0:  # 定期檢查
-                    should_monitor = True
-                
                 if should_monitor:
                     self.logger.info(f"🔍 Enhanced Health Check - Epoch {epoch_id}")
                     self.check_tanh_saturation(epoch_id)
