@@ -12,6 +12,41 @@ import argparse
 
 torch.backends.cudnn.benchmark = True
 
+def display_supervision_setup(config_manager, rank=0):
+    """顯示監督設置和監督點位置"""
+    if rank != 0:  # 只在主進程顯示
+        return
+        
+    supervision_config = config_manager.config.supervision
+    
+    print("🎯 監督數據配置:")
+    print(f"   啟用狀態: {'✅ 啟用' if supervision_config.enabled else '❌ 關閉'}")
+    print(f"   監督點數: {supervision_config.data_points}")
+    print(f"   數據權重: {supervision_config.weight}")
+    print(f"   隨機種子: {supervision_config.random_seed}")
+    print(f"   數據路徑: {supervision_config.data_path}")
+    
+    if supervision_config.enabled and supervision_config.data_points > 0:
+        print("\n" + "="*50)
+        print("🔍 監督點位置詳細信息：")
+        print("="*50)
+        
+        # 檢查數據文件是否存在
+        if not os.path.exists(supervision_config.data_path):
+            print(f"⚠️  數據文件不存在: {supervision_config.data_path}")
+            return
+            
+        from cavity_data import DataLoader
+        loader = DataLoader()
+        try:
+            loader.print_supervision_locations(
+                supervision_config.data_path,
+                supervision_config.data_points, 
+                supervision_config.random_seed
+            )
+        except Exception as e:
+            print(f"⚠️  載入監督點位置時出錯: {e}")
+
 def parse_args():
     """解析命令行參數"""
     parser = argparse.ArgumentParser(description='PINN Training with Configuration Management')
@@ -103,6 +138,9 @@ def main():
             
             # 顯示配置
             config_manager.print_config()
+            
+            # 顯示監督數據設置
+            display_supervision_setup(config_manager, rank)
             
             if args.dry_run:
                 print("🏃 Dry run模式，不執行訓練")

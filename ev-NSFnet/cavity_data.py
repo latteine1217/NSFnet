@@ -158,9 +158,62 @@ class DataLoader:
         print(f'-----------------------------')
         print(f'Supervision data loaded: {num_points} points')
         if num_points > 0:
-            print(f'Sample point coordinates: x={x_sup[0,0]:.4f}, y={y_sup[0,0]:.4f}')
-            print(f'Sample point values: u={u_sup[0,0]:.4f}, v={v_sup[0,0]:.4f}, p={p_sup[0,0]:.4f}')
+            print(f'Sample point coordinates: x={x_sup[0,0]:.6f}, y={y_sup[0,0]:.6f}')
+            print(f'Sample point values: u={u_sup[0,0]:.6f}, v={v_sup[0,0]:.6f}, p={p_sup[0,0]:.6f}')
+            print(f'💡 使用 loader.print_supervision_locations() 查看所有監督點詳情')
         print(f'-----------------------------')
         
         return x_sup, y_sup, u_sup, v_sup, p_sup
+
+    def print_supervision_locations(self, filename, num_points=1, random_seed=42):
+        """
+        打印所有監督點的詳細位置信息
+        
+        Args:
+            filename: .mat文件路径
+            num_points: 监督点数量
+            random_seed: 随机种子，确保可重现性
+        """
+        print(f'====== 監督數據點位置詳情 ======')
+        print(f'數據文件: {filename}')
+        print(f'監督點數: {num_points}')
+        print(f'隨機種子: {random_seed}')
+        print(f'--------------------------------')
+        
+        if num_points <= 0:
+            print('⚠️  未使用監督數據點')
+            print(f'================================')
+            return
+        
+        # 載入監督數據
+        x_sup, y_sup, u_sup, v_sup, p_sup = self.loading_supervision_data(
+            filename, num_points, random_seed)
+        
+        # 打印每個監督點的詳細信息
+        for i in range(num_points):
+            print(f'📍 監督點 {i+1:>2}:')
+            print(f'   座標: x = {x_sup[i,0]:>8.6f}, y = {y_sup[i,0]:>8.6f}')
+            print(f'   速度: u = {u_sup[i,0]:>8.6f}, v = {v_sup[i,0]:>8.6f}')
+            print(f'   壓力: p = {p_sup[i,0]:>8.6f}')
+            
+            # 計算與計算域中心和邊界的距離
+            center_dist = np.sqrt((x_sup[i,0] - 0.5)**2 + (y_sup[i,0] - 0.5)**2)
+            boundary_dist = min(x_sup[i,0], 1-x_sup[i,0], y_sup[i,0], 1-y_sup[i,0])
+            
+            print(f'   距中心: {center_dist:>8.6f}')
+            print(f'   距邊界: {boundary_dist:>8.6f}')
+            
+            # 區域標識
+            if boundary_dist < 0.1:
+                region = "邊界區"
+            elif center_dist < 0.2:
+                region = "中心區"
+            else:
+                region = "主流區"
+            print(f'   區域位置: {region}')
+            
+            if i < num_points - 1:
+                print(f'   ................................')
+        
+        print(f'================================')
     
