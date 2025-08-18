@@ -172,9 +172,10 @@ def main():
             supervision_data_points=config.supervision.data_points if hasattr(config, 'supervision') else 0,
             supervision_data_path=config.supervision.data_path if hasattr(config, 'supervision') else None,
             supervision_random_seed=config.supervision.random_seed if hasattr(config, 'supervision') else 42,
-            checkpoint_freq=config.training.checkpoint_freq
+            checkpoint_freq=config.training.checkpoint_freq,
+            config=config
         )
-        PINN.config = config
+        # config 已於構造時注入並在DDP前完成縮放
         
         # 只在主進程顯示數據載入信息
         if rank == 0:

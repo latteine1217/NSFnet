@@ -49,37 +49,20 @@ class FCNet(torch.nn.Module):
         # deploy layers
         self.layers = torch.nn.Sequential(layerDict)
         
-        # 應用針對tanh的Xavier初始化
+        # 應用針對tanh的Xavier初始化（不做額外縮放；縮放由外部依配置完成）
         self._initialize_weights()
 
     def _initialize_weights(self):
-        """優化的Xavier初始化策略"""
+        """Xavier initialization tailored for tanh without extra scaling.
+
+        External scaling for first/last layers is applied by the solver
+        based on configuration to keep initialization concerns separated.
+        """
         gain = nn.init.calculate_gain('tanh')
-        layers_list = []
-        
-        # 收集所有Linear層
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                layers_list.append(module)
-        
-        # 對每層應用Xavier初始化
-        for i, layer in enumerate(layers_list):
-            nn.init.xavier_uniform_(layer.weight, gain=gain)
-            nn.init.zeros_(layer.bias)
-            
-            if i == 0:
-                # 首層: 調整縮放，避免輸入飽和
-                layer.weight.data.mul_(0.8) 
-            elif i == len(layers_list) - 1:
-                # 末層: 基於物理量級設計
-                is_evm = (layer.out_features == 1)
-                if is_evm:
-                    # EVM: 初始值應接近alpha_evm初始值
-                    scale = 0.8   # 調整EVM網路初始化縮放因子
-                else:
-                    # 主網路: 初始值應為物理量級
-                    scale = 0.8
-                layer.weight.data.mul_(scale)
+                nn.init.xavier_uniform_(module.weight, gain=gain)
+                nn.init.zeros_(module.bias)
 
     def forward(self, x):
         out = self.layers(x)

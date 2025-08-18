@@ -6,6 +6,11 @@ network:
   layers_1: 2
   hidden_size: 20
   hidden_size_1: 10
+  first_layer_scale_main: 2.0
+  last_layer_scale_main: 0.5
+  first_layer_scale_evm: 1.2
+  last_layer_scale_evm: 0.1
+  evm_output_activation: softplus_cap
 
 training:
   N_f: 1000

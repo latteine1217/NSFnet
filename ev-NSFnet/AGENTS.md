@@ -7,6 +7,10 @@
 - 了解CFD相關工程知識、GPU並行化知識
 - **最重要的**：擅長使用pytorch進行開發
 
+## 語言使用規則
+- 平時回覆以及註解撰寫：中文
+- 作圖標題、label：英文
+
 ## 硬體環境規則
 本專案使用Dell R740伺服器運行（Intel Xeon Gold 5118 12 Core*2/ 48 threads, 112GB memory, Nvidia P100 16GB *2）。請根據此硬體配置來審查以及設計錯誤解決方式。不要使用本地python做執行測試，需要測試的檔案請寫好後讓我自己手動運行。
 
@@ -87,46 +91,27 @@
 - 使用註解在功能前面簡略說明
 - 若程式有輸出需求，讓輸出能一目瞭然並使用'==='或是'---'來做分隔
 
-## Learning Rate Scheduler 修復記錄
-### 問題描述
-- **原始問題**: CosineAnnealingLR和MultiStepLR scheduler在訓練過程中學習率保持不變
-- **根本原因**: EVM網路的freeze/unfreeze機制（每10000個epoch）重建optimizer，但scheduler仍綁定到舊的optimizer實例
-- **影響**: 所有需要動態學習率的訓練策略失效，導致訓練效果不佳
-
-### 修復方案 (2025-01-11)
-- **核心修復**: 在`pinn_solver.py`中實現scheduler自動重建機制
-- **修改位置**:
-  1. `solve_Adam()`: 存储scheduler參數以便重建
-  2. `_rebuild_scheduler()`: 新增方法重建CosineAnnealingLR和MultiStepLR
-  3. `freeze_evm_net()`: optimizer重建後自動重建scheduler
-  4. `defreeze_evm_net()`: optimizer重建後自動重建scheduler  
-  5. `train_with_lbfgs_segment()`: L-BFGS結束後自動重建scheduler
-
-### 技術細節
-- **參數保持**: 保存scheduler的`T_max`, `eta_min`, `milestones`, `gamma`, `last_epoch`等關鍵參數
-- **狀態延續**: 重建時保持scheduler的訓練狀態（`last_epoch`）
-- **initial_lr修復**: 確保新optimizer包含`initial_lr`參數防止PyTorch報錯
-- **智能切換**: 訓練循環優先使用重建後的scheduler
-
-### 驗證結果
-- ✅ CosineAnnealingLR正確按餘弦曲線調整學習率
-- ✅ MultiStepLR在指定milestone正確降低學習率  
-- ✅ freeze/unfreeze操作後scheduler狀態正確保持
-- ✅ TensorBoard能正確顯示學習率變化曲線
-
-### 使用建議
-- 配置文件中可安全使用所有scheduler類型：`Constant`, `MultiStepLR`, `CosineAnnealingLR`
-- 推薦使用`CosineAnnealingLR`獲得更平滑的學習率衰減
-- 修復後無需額外配置，所有現有配置文件自動生效
-
 ## 開發者指引 👨‍💻
 
-### 🎯 角色扮演準則
-> 當執行專案任務時，請扮演一位 **該專案使用之程式語言 專家**，具備以下特質：
-> - 🔍 **類型安全優先**
-> - ⚡ **效能導向**
-> - 🧪 **測試驅動**: 重視程式碼品質，推崇文檔覆蓋
-> - 🔄 **現代化架構**
+### 程式構建指引
+
+**以下順序為建構程式時需要遵循及考慮的優先度**
+1. **理論完整度（Theoretical Soundness）**
+- 確保數學模型、控制方程式、邊界條件、數值方法都嚴謹且合理。
+- 優先驗證模型假設與理論一致性，避免模型本身就偏離物理實際。
+
+2. **可驗證性與再現性（Verifiability & Reproducibility）**
+- 必須有明確的數值驗證（Verification）與實驗比對（Validation）流程，讓其他研究者可以重現結果。
+- 資料、代碼、參數設定要清楚公開或可存取。
+
+3. **數值穩定性與收斂性（Numerical Stability & Convergence）**
+- 選擇合適的離散方法、網格劃分與時間步長，確保結果不因數值震盪或誤差累積而失效。
+
+4. **簡潔性與可解釋性（Simplicity & Interpretability）**
+- 在理論與程式結構上避免過度複雜，以便讀者理解核心貢獻。
+
+5. **效能與可擴展性（Performance & Scalability）**
+- 如果研究包含大規模計算，需確保程式能在高效能運算環境中平穩運行
 
 仔細思考，只執行我給你的具體任務，用最簡潔優雅的解決方案，盡可能少的修改程式碼
 
@@ -144,9 +129,6 @@
 - **📁 檔案參考**: 遇到 `@filename` 時使用 Read 工具載入內容
 - **🔄 懶惰載入**: 按需載入參考資料，避免預先載入所有檔案
 - **💬 回應方式**: 優先提供計畫和建議，除非用戶明確要求立即實作
-
-## 檔案參考
-重要： 當您遇到檔案參考 (例如 @rules/general.md)，請使用你的read工具，依需要載入。它們與當前的 SPECIFIC 任務相關。
 
 ### 說明：
 - 請勿預先載入所有參考資料 - 根據實際需要使用懶惰載入

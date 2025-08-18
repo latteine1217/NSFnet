@@ -15,6 +15,12 @@ class NetworkConfig:
     layers_1: int = 4                  # EVM網路層數
     hidden_size: int = 80              # 主網路神經元數
     hidden_size_1: int = 40            # EVM網路神經元數
+    # 首/末層縮放（主網/EVM）與EVM輸出激活
+    first_layer_scale_main: float = 2.0
+    last_layer_scale_main: float = 0.5
+    first_layer_scale_evm: float = 1.2
+    last_layer_scale_evm: float = 0.1
+    evm_output_activation: str = "softplus_cap"  # 可選：softplus_cap | abs_cap
 
 @dataclass
 class LBFGSConfig:

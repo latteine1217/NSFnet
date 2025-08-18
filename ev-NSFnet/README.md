@@ -169,14 +169,61 @@ training:
 
 ### 渦流黏度模型
 ```
-νₜ = min(α_evm × |e|, β/Re)
+νₜ = min(α_evm × softplus(|e|), β/Re)
 Residual = (eq1×(u-0.5) + eq2×(v-0.5)) - e
 ```
 
 **人工粘滯度上限控制**:
-- 上限值: β/Re (β可在配置文件中調整)
+- 上限值: β/Re（β可在配置文件中調整，production 默認 β=5.0）
 - 防止過度人工粘滯度影響物理真實性
-- 默認β=1.0，可根據Reynolds數調整
+- 可根據Reynolds數與問題難度調整（建議 β∈[1,5]）
+
+## 🧩 新設定：首/末層縮放與 EVM 輸出映射（重要）
+
+為了在 Re=5000 的高頻流動中提升表達能力並保持訓練穩定，新增以下可配置參數：
+
+### 網路首/末層縮放（初始化後套用）
+
+- first_layer_scale_main: 主網路首層縮放（建議 2.0–2.5，預設 2.0）
+- last_layer_scale_main: 主網路末層縮放（建議 0.5–0.8，預設 0.5）
+- first_layer_scale_evm: EVM 網路首層縮放（建議 1.0–1.5，預設 1.2）
+- last_layer_scale_evm: EVM 網路末層縮放（建議 0.05–0.1，預設 0.1）
+
+實作細節：
+- 所有 Linear 層先以 Xavier 初始化（gain=calculate_gain('tanh')），再對首/末層權重做縮放。
+- 縮放在 DDP 包裹前完成，確保多 GPU 參數一致，且與 optimizer 狀態一致。
+
+### EVM 輸出映射與上限（避免過度擴散）
+
+- evm_output_activation: softplus_cap（預設）
+- 邏輯：nu_e = softplus(|e_raw|) ≥ 0，並以 β/Re 作元素級上限；實際人工黏滯為 α_evm × nu_e，再與上限比較取最小值。
+- 熵殘差方程仍使用帶符號的 e_raw，不改動其物理含義。
+
+### 配置範例（已內建於 configs/production.yaml）
+
+```yaml
+network:
+  layers: 6
+  layers_1: 4
+  hidden_size: 80
+  hidden_size_1: 40
+  first_layer_scale_main: 2.0
+  last_layer_scale_main: 0.5
+  first_layer_scale_evm: 1.2
+  last_layer_scale_evm: 0.1
+  evm_output_activation: softplus_cap
+
+physics:
+  Re: 5000
+  alpha_evm: 0.03
+  beta: 5.0   # 人工黏滯上限係數（cap=β/Re）
+```
+
+### 使用建議與監測指標
+
+- 若 tanh 飽和（loss 劇烈震盪），將主網首層縮放降為 2.0；確保 (x,y) 已標準化至 [-1,1]。
+- 若 PDE loss 長期停滯，將主網末層縮放調至 0.6–0.7。
+- 監測 ν_e 的 P95/P99 與 cap 命中率；若長期接近上限，優先降低 last_layer_scale_evm 或 α_evm。
 
 ## 📁 資料結構
 
