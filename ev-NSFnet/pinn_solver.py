@@ -411,14 +411,10 @@ class PysicsInformedNeuralNetwork:
             if high_saturation_layers:
                 self.logger.warning(f"⚠️  高飽和層 (>30%): {high_saturation_layers}")
             
-            # 簡要統計
-            avg_saturation = sum(ratio for _, ratio in saturation_info) / len(saturation_info)
-            
             # 記錄到TensorBoard
             if self.tb_writer is not None:
-                self.safe_tensorboard_log('NetworkHealth/Avg_Saturation_Rate', avg_saturation, epoch_id)
                 for name, ratio in saturation_info:
-                    self.safe_tensorboard_log(f'NetworkHealth/Saturation_{name}', ratio, epoch_id)
+                    self.safe_tensorboard_log(f"NetworkHealth/Saturation_{name}", ratio, epoch_id)
             
             # 梯度分析 (增強診斷)
             grad_norms = []
@@ -464,8 +460,6 @@ class PysicsInformedNeuralNetwork:
             
             # 整體健康狀態評估
             health_issues = []
-            if avg_saturation > 0.3:
-                health_issues.append(f"高飽和率({avg_saturation*100:.1f}%)")
             if hasattr(self, 'opt') and grad_norms:
                 if avg_grad_norm < 1e-6:
                     health_issues.append("梯度消失")
@@ -1191,6 +1185,12 @@ class PysicsInformedNeuralNetwork:
                 need_precise_timing = (
                     epoch_id % 100 == 0 or               # 每100 epochs進行時間預估
                     epoch_id == 0 or                     # 首個epoch
+            # 記錄epoch開始時間（僅在需要精確計時時同步GPU）
+            if self.rank == 0:
+                # 確定是否需要精確計時
+                need_precise_timing = (
+                    epoch_id % 100 == 0 or               # 每100 epochs進行時間預估
+                    epoch_id == 0 or                     # 首個epoch
                     epoch_id == num_epoch - 1 or         # 最後epoch
                     (epoch_id + 1) % 1000 == 0           # console輸出時需要精確時間
                 )
@@ -1201,12 +1201,6 @@ class PysicsInformedNeuralNetwork:
                     except Exception:
                         pass
                 self.epoch_start_time = time.time()
-                )
-                
-                if need_precise_timing and torch.cuda.is_available():
-                    try:
-                        torch.cuda.synchronize(self.device)
-                    except Exception:
                         pass
                 self.epoch_start_time = time.time()
             
@@ -1331,6 +1325,12 @@ class PysicsInformedNeuralNetwork:
                 if self.rank == 0:
                     print("✅ 離開 L-BFGS 段，恢復 Adam")
                 self.opt = torch.optim.Adam(list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters()), lr=current_lr, weight_decay=0.0)
+                
+                # 确保有initial_lr参数
+                for group in self.opt.param_groups:
+                    group['initial_lr'] = current_lr
+                
+                # 關鍵修復：L-BFGS結束後必須重建scheduler
             # 時間追蹤和預估（只在rank 0執行；僅在需要精確計時時同步GPU）
             if self.rank == 0:
                 # 確定是否需要精確計時（與開始時相同的邏輯）
@@ -1348,12 +1348,6 @@ class PysicsInformedNeuralNetwork:
                         pass
                 epoch_end_time = time.time()
                 epoch_time = epoch_end_time - self.epoch_start_time
-                    print(f"🔧 Scheduler {scheduler_status}")
-                
-                self.last_strategy_step = self.stage_step
-
-            if profiler:
-                profiler.step()
 
             # 時間追蹤和預估（只在rank 0執行；僅在需要精確計時時同步GPU）
             if self.rank == 0:
