@@ -24,12 +24,12 @@ training:
   pde_distance_w_min: 0.2            # 權重下限，避免遠區為0
   pde_distance_tau: 0.1              # 距離尺度 (越小越聚焦邊界)
   training_stages:
-    - [0.05, 200000, 1e-3, Constant]            # Stage 1
-    - [0.04, 100000, 1e-3, CosineAnnealingLR]   # Stage 2
-    - [0.03, 200000, 2e-4, CosineAnnealingLR]   # Stage 3
-    - [0.01, 200000, 4e-5, CosineAnnealingLR]   # Stage 4
-    - [0.005, 200000, 1e-5, CosineAnnealingLR]  # Stage 5
-    - [0.0002, 200000, 2e-6, Constant]          # Stage 6
+    - [0.05, 150000, 1e-3, Constant]            # Stage 1
+    - [0.03, 150000, 1e-3, CosineAnnealingLR]   # Stage 2
+    - [0.01, 200000, 2e-4, CosineAnnealingLR]   # Stage 3
+    - [0.005, 200000, 4e-5, CosineAnnealingLR]   # Stage 4
+    - [0.002, 200000, 1e-5, CosineAnnealingLR]  # Stage 5
+    - [0.001, 200000, 2e-6, Constant]          # Stage 6
   
   # L-BFGS相關配置
   lbfgs:
