@@ -128,6 +128,9 @@ class PysicsInformedNeuralNetwork:
         self.current_stage = ' '
 
         self.checkpoint_freq = checkpoint_freq
+        # 提示控制
+        self._tips_last_step = {}
+        self.prev_strategy_step = -10**9
 
         # TensorBoard設定
         if self.rank == 0:  # 只在主進程創建TensorBoard writer
@@ -600,7 +603,8 @@ class PysicsInformedNeuralNetwork:
         # 更新 vis_t_minus (移到GPU上避免CPU-GPU轉換)
         cap_val = float(self.beta) / float(self.Re) if self.beta is not None else (1.0 / float(self.Re))
         nu_e_now = self._compute_nu_e(e_raw)
-        self.vis_t_minus_gpu = torch.minimum(self.alpha_evm * nu_e_now.detach(), torch.full_like(nu_e_now, cap_val))
+        if not getattr(self, 'lock_vis_t_minus', False):
+            self.vis_t_minus_gpu = torch.minimum(self.alpha_evm * nu_e_now.detach(), torch.full_like(nu_e_now, cap_val))
 
         # NS equations - 優化：避免重複的乘法運算
         vis_total = (1.0/self.Re + self.vis_t)
@@ -915,52 +919,111 @@ class PysicsInformedNeuralNetwork:
             self.opt.param_groups[0]['lr'] = lr
         return self.solve_Adam(self.fwd_computing_loss_2d, num_epoch, batchsize, scheduler, profiler, start_epoch)
 
-    def _check_distributed_lbfgs_trigger(self):
-        """分佈式L-BFGS觸發檢測"""
+    def _stage_group_index(self) -> int:
+        """將 Stage 1-6 分為三段：0:(1-2), 1:(3-4), 2:(5-6)"""
+        try:
+            name = str(self.current_stage)
+            if 'Stage' in name:
+                idx = int(name.split()[-1])
+            else:
+                idx = 1
+        except Exception:
+            idx = 1
+        if idx <= 2:
+            return 0
+        elif idx <= 4:
+            return 1
+        return 2
+
+    def _compute_ema(self, seq, gamma: float) -> float:
+        """對序列做EMA平滑（返回最後EMA）"""
+        ema = None
+        for v in seq:
+            if ema is None:
+                ema = float(v)
+            else:
+                ema = gamma * ema + (1.0 - gamma) * float(v)
+        return float(ema) if ema is not None else 0.0
+
+    def _check_distributed_lbfgs_trigger(self) -> bool:
+        """分佈式L-BFGS觸發檢測（改為EMA相對改善 + 梯度/物理條件 + 冷卻）"""
         trigger_lbfgs = False
-        
-        # 檢查是否啟用分佈式L-BFGS
-        lbfgs_config = getattr(self, 'config', None)
-        if lbfgs_config and hasattr(lbfgs_config.training, 'lbfgs'):
-            if not lbfgs_config.training.lbfgs.enabled_in_distributed and self.world_size > 1:
-                return False  # 分佈式模式下禁用L-BFGS
-        
-        # 檢查基本條件
-        if (self.stage_step >= 20000 and 
-            (self.stage_step - self.last_strategy_step) >= 5000 and 
-            len(self.stage_loss_deque) >= 10000):
-            
-            # rank 0計算波動度並做決定
-            if self.rank == 0:
-                recent_10k = list(self.stage_loss_deque)[-10000:]
-                min_loss = min(recent_10k)
-                max_loss = max(recent_10k)
-                volatility = (max_loss - min_loss) / min_loss if min_loss > 0 else float('inf')
-                
-                # 從配置獲取波動度閾值
-                if lbfgs_config and hasattr(lbfgs_config.training, 'lbfgs'):
-                    volatility_threshold = lbfgs_config.training.lbfgs.volatility_threshold
-                else:
-                    volatility_threshold = 0.01  # 默認1%
-                    
-                trigger_lbfgs = volatility < volatility_threshold
-                
-                if trigger_lbfgs:
-                    mode = "分佈式" if self.world_size > 1 else "單GPU"
-                    print(f"🔧 波動度觸發{mode} L-BFGS (volatility={volatility*100:.3f}%, min={min_loss:.2e}, max={max_loss:.2e})")
-            
-            # 分佈式模式下廣播觸發決定
-            if self.world_size > 1:
-                try:
-                    trigger_data = [trigger_lbfgs]
-                    dist.broadcast_object_list(trigger_data, src=0)
-                    trigger_lbfgs = trigger_data[0]
-                except Exception as e:
-                    if self.rank == 0:
-                        print(f"🚨 L-BFGS觸發廣播失敗: {e}")
-                    trigger_lbfgs = False
-                    
+
+        # 配置與分佈式開關
+        cfg = getattr(self, 'config', None)
+        lbfgs_cfg = getattr(cfg.training, 'lbfgs', None) if cfg and hasattr(cfg, 'training') else None
+        if lbfgs_cfg and not lbfgs_cfg.enabled_in_distributed and self.world_size > 1:
+            return False
+
+        # 冷卻
+        cooldown = getattr(lbfgs_cfg, 'cooldown_steps', 5000) if lbfgs_cfg else 5000
+        if (self.stage_step - self.last_strategy_step) < cooldown:
+            return False
+
+        # 需要足夠的滑窗
+        group_idx = self._stage_group_index()
+        windows = getattr(lbfgs_cfg, 'trigger_window_per_stage', [5000, 7500, 10000]) if lbfgs_cfg else [5000, 7500, 10000]
+        min_improves = getattr(lbfgs_cfg, 'min_improve_pct_per_stage', [0.02, 0.01, 0.005]) if lbfgs_cfg else [0.02, 0.01, 0.005]
+        W = int(windows[min(group_idx, len(windows)-1)])
+        min_r = float(min_improves[min(group_idx, len(min_improves)-1)])
+        gamma = float(getattr(lbfgs_cfg, 'ema_gamma', 0.95)) if lbfgs_cfg else 0.95
+
+        if len(self.stage_loss_deque) < max(W, 50):
+            return False
+
+        if self.rank == 0:
+            losses = list(self.stage_loss_deque)
+            L_t = float(losses[-1])
+            L_w = float(losses[-W])
+            denom = max(self._compute_ema(losses[-W:], gamma), 1e-12)
+            r = (L_w - L_t) / denom
+
+            # 梯度條件
+            grad_med = float(getattr(self, 'grad_median', 1e9))
+            grad_iqr = float(getattr(self, 'grad_iqr', 0.0))
+            grad_iqr_ratio = grad_iqr / (grad_med + 1e-12)
+            g_base = float(getattr(self, 'grad_baseline', grad_med))
+            rel_ok = grad_med < (getattr(lbfgs_cfg, 'grad_relative_factor', 0.01) * g_base) if lbfgs_cfg else False
+            abs_ok = grad_med < (getattr(lbfgs_cfg, 'grad_median_abs_thresh', 1e-3) if lbfgs_cfg else 1e-3)
+            cos_ema = float(getattr(self, 'grad_cos_ema', 0.0))
+            cos_ok = cos_ema > (getattr(lbfgs_cfg, 'grad_cos_ema_thresh', 0.9) if lbfgs_cfg else 0.9)
+
+            grad_ok = (abs_ok or rel_ok) and (grad_iqr_ratio < 5.0 or cos_ok)
+
+            # 物理條件：α_evm小、黏滯使用率不貼頂
+            alpha_ok = self.alpha_evm <= 0.01
+            cap_ratio_p95 = float(getattr(self, 'vis_cap_p95', 0.0))  # 由訓練循環維護
+            phys_ok = cap_ratio_p95 < 0.5
+
+            trigger_lbfgs = (r <= min_r) and grad_ok and alpha_ok and phys_ok
+
+        # 廣播
+        if self.world_size > 1:
+            try:
+                data = [trigger_lbfgs]
+                dist.broadcast_object_list(data, src=0)
+                trigger_lbfgs = data[0]
+            except Exception as e:
+                if self.rank == 0:
+                    print(f"🚨 L-BFGS觸發廣播失敗: {e}")
+                trigger_lbfgs = False
+
         return trigger_lbfgs
+
+    def _log_tip_once(self, key: str, msg: str):
+        """在rank0輸出一次提示，每1萬步同類不重複"""
+        try:
+            if self.rank != 0:
+                return
+            if not (hasattr(self, 'config') and hasattr(self.config, 'training') and getattr(self.config.training, 'log_tips', True)):
+                return
+            now = int(getattr(self, 'stage_step', 0))
+            last = int(self._tips_last_step.get(key, -10**9))
+            if now - last >= 10000:
+                print("--- Tips ---\n" + msg)
+                self._tips_last_step[key] = now
+        except Exception:
+            pass
 
     def _calculate_parameter_checksum(self, net_state, net1_state):
         """計算參數校驗碼"""
@@ -1062,6 +1125,11 @@ class PysicsInformedNeuralNetwork:
         best_loss = float('inf')
         
         try:
+            # 段內策略：可選凍結EVM、鎖定vis_t_minus
+            if lbfgs_config and hasattr(lbfgs_config.training, 'lbfgs') and lbfgs_config.training.lbfgs.freeze_evm_during_lbfgs:
+                self.freeze_evm_net(self.stage_step)
+            self.lock_vis_t_minus = True
+
             self.opt.zero_grad(set_to_none=True)
             params = list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters())
             lbfgs = torch.optim.LBFGS(params,
@@ -1072,6 +1140,9 @@ class PysicsInformedNeuralNetwork:
                                       line_search_fn=lbfgs_params.get('line_search_fn', 'strong_wolfe'))
             
             stagnation = 0
+            start_time = time.time()
+            patience = int(lbfgs_config.training.lbfgs.early_stop_patience) if lbfgs_config and hasattr(lbfgs_config.training, 'lbfgs') else 8
+            min_delta = float(lbfgs_config.training.lbfgs.early_stop_min_delta) if lbfgs_config and hasattr(lbfgs_config.training, 'lbfgs') else 1e-4
             
             def closure():
                 lbfgs.zero_grad(set_to_none=True)
@@ -1079,11 +1150,13 @@ class PysicsInformedNeuralNetwork:
                 loss.backward()
                 return loss
             
+            stop_reason = "done"
             if self.world_size > 1:
                 # 分佈式模式：僅rank 0執行L-BFGS
                 if self.rank == 0:
                     for step in range(max_outer_steps):
                         try:
+                            loss_prev = best_loss
                             loss_val = lbfgs.step(closure).item()
                             if step % log_interval == 0:
                                 print(f"[分佈式 L-BFGS] step={step} loss={loss_val:.3e}")
@@ -1092,12 +1165,21 @@ class PysicsInformedNeuralNetwork:
                                 best_loss = loss_val
                                 stagnation = 0
                             else:
-                                stagnation += 1
+                                if (loss_prev - loss_val) < min_delta:
+                                    stagnation += 1
+                                else:
+                                    stagnation = 0
                             
-                            if best_loss < 1e-8 or stagnation > 200:
+                            if best_loss < 1e-8 or stagnation >= patience:
+                                stop_reason = "early_stop"
+                                break
+                            if time.time() - start_time > timeout_seconds:
+                                print("⏱️ L-BFGS 段達到超時限制，提前結束")
+                                stop_reason = "timeout"
                                 break
                         except Exception as e:
                             print(f"🚨 L-BFGS步驟失敗 (step={step}): {e}")
+                            stop_reason = "error"
                             break
                 
                 # 使用增強的參數同步機制
@@ -1111,6 +1193,7 @@ class PysicsInformedNeuralNetwork:
                 # 單GPU模式
                 for step in range(max_outer_steps):
                     try:
+                        loss_prev = best_loss
                         loss_val = lbfgs.step(closure).item()
                         if step % log_interval == 0:
                             print(f"[L-BFGS] step={step} loss={loss_val:.3e}")
@@ -1119,13 +1202,23 @@ class PysicsInformedNeuralNetwork:
                             best_loss = loss_val
                             stagnation = 0
                         else:
-                            stagnation += 1
+                            if (loss_prev - loss_val) < min_delta:
+                                stagnation += 1
+                            else:
+                                stagnation = 0
                         
-                        if best_loss < 1e-8 or stagnation > 200:
+                        if best_loss < 1e-8 or stagnation >= patience:
+                            stop_reason = "early_stop"
+                            break
+                        if time.time() - start_time > timeout_seconds:
+                            if self.rank == 0:
+                                print("⏱️ L-BFGS 段達到超時限制，提前結束")
+                            stop_reason = "timeout"
                             break
                     except Exception as e:
                         if self.rank == 0:
                             print(f"🚨 L-BFGS步驟失敗 (step={step}): {e}")
+                        stop_reason = "error"
                         break
                 
                 success = True
@@ -1144,7 +1237,12 @@ class PysicsInformedNeuralNetwork:
         for group in self.opt.param_groups:
             group['initial_lr'] = current_lr
         
-        # 重建scheduler以绑定新的optimizer
+        # 段後解鎖/解凍並重建scheduler以绑定新的optimizer
+        self.lock_vis_t_minus = False
+        try:
+            self.defreeze_evm_net(self.stage_step)
+        except Exception:
+            pass
         self._rebuild_scheduler()
         
         # 如果L-BFGS失敗且有備份，嘗試恢復Adam狀態
@@ -1160,6 +1258,14 @@ class PysicsInformedNeuralNetwork:
         if self.rank == 0:
             status = "成功" if success else "失敗，已回退"
             print(f"=== 離開 {mode} L-BFGS 段 ({status}) ===")
+            # 訊息提示
+            if hasattr(self, 'config') and hasattr(self.config, 'training') and getattr(self.config.training, 'log_tips', True):
+                if stop_reason == "timeout":
+                    self._log_tip_once('lbfgs_timeout', "L-BFGS 段因 timeout 結束；建議 max_iter→20 或縮短 timeout_seconds。")
+                elif stop_reason == "early_stop":
+                    self._log_tip_once('lbfgs_early_stop', "L-BFGS 連續多次改善很小而早停；可調整 tolerance 或增加 cooldown 減少頻度。")
+                elif stop_reason == "error":
+                    self._log_tip_once('lbfgs_error', "L-BFGS 段出現錯誤；確保段內 FP32、可暫停 line search 或降低 max_iter。")
         
         return best_loss
 
@@ -1378,27 +1484,91 @@ class PysicsInformedNeuralNetwork:
             self.global_step += 1
             self.stage_step += 1
             self.stage_loss_deque.append(epoch_loss)
+            
+            # 監測：梯度分佈與方向穩定性
+            try:
+                grad_norms = []
+                flat_list = []
+                for p in list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters()):
+                    if p.grad is not None:
+                        g = p.grad.detach()
+                        grad_norms.append(g.norm().item())
+                        flat_list.append(g.view(-1).float().cpu())
+                if grad_norms:
+                    import numpy as _np
+                    med = float(_np.median(grad_norms))
+                    q1 = float(_np.percentile(grad_norms, 25))
+                    q3 = float(_np.percentile(grad_norms, 75))
+                    self.grad_median = med
+                    self.grad_iqr = max(q3 - q1, 0.0)
+                    if not hasattr(self, 'grad_baseline'):
+                        self.grad_baseline = med
+                    else:
+                        if self.stage_step < 5000:
+                            self.grad_baseline = 0.99 * self.grad_baseline + 0.01 * med
+                    if flat_list:
+                        g_flat = torch.cat(flat_list)
+                        if hasattr(self, 'prev_grad_flat') and self.prev_grad_flat is not None:
+                            denom = (g_flat.norm() * self.prev_grad_flat.norm()).item() + 1e-12
+                            cos = float((g_flat @ self.prev_grad_flat).item() / denom)
+                            self.grad_cos_ema = 0.9 * float(getattr(self, 'grad_cos_ema', 0.0)) + 0.1 * cos
+                        self.prev_grad_flat = g_flat
+            except Exception:
+                pass
+
+            # 監測：人工黏滯上限命中率（P95）
+            try:
+                if hasattr(self, 'vis_t_minus_gpu') and self.vis_t_minus_gpu is not None:
+                    cap_val = float(self.beta) / float(self.Re) if self.beta is not None else (1.0 / float(self.Re))
+                    if cap_val > 0:
+                        sl = min(self.vis_t_minus_gpu.shape[0], 4096)
+                        ratio = (self.vis_t_minus_gpu[:sl] / cap_val).clamp(max=1.0).detach().float().cpu()
+                        self.vis_cap_p95 = float(torch.quantile(ratio.view(-1), 0.95).item())
+            except Exception:
+                pass
             # 分佈式L-BFGS觸發檢測
             trigger_lbfgs = self._check_distributed_lbfgs_trigger()
+            # 提示：長時間未觸發 or 人工黏滯偏高
+            try:
+                cfg = getattr(self, 'config', None)
+                lb = getattr(cfg.training, 'lbfgs', None) if cfg and hasattr(cfg, 'training') else None
+                group_idx = self._stage_group_index()
+                W_list = getattr(lb, 'trigger_window_per_stage', [5000, 7500, 10000]) if lb else [5000, 7500, 10000]
+                W = int(W_list[min(group_idx, len(W_list)-1)])
+                cooldown = int(getattr(lb, 'cooldown_steps', 5000)) if lb else 5000
+                # 長時間未觸發
+                if (self.stage_step - self.last_strategy_step) > (2 * W):
+                    self._log_tip_once('not_trigger', f"L-BFGS 未觸發已超過 {2*W} 步；可降低 min_improve_pct 或縮短 cooldown ({cooldown}).")
+                # 人工黏滯偏高
+                if float(getattr(self, 'vis_cap_p95', 0.0)) > 0.7:
+                    # 積累2000步以上再提示
+                    if not hasattr(self, '_vis_high_steps'):
+                        self._vis_high_steps = 0
+                    self._vis_high_steps += 1
+                    if self._vis_high_steps > 2000:
+                        self._log_tip_once('vis_cap_high', "人工黏滯使用率偏高（P95>0.7）；建議將 last_layer_scale_evm 調至 0.05 或降低 α_evm。")
+                else:
+                    self._vis_high_steps = 0
+            except Exception:
+                pass
             if trigger_lbfgs:
-                current_lr = self.opt.param_groups[0]['lr'] if self.opt is not None else 1e-4
-                lbfgs_cfg = {
-                    'max_iter': 50,
-                    'history_size': 20,
-                    'tolerance_grad': 1e-8,
-                    'tolerance_change': 1e-9,
-                    'line_search_fn': 'strong_wolfe'
-                }
-                self.train_with_lbfgs_segment(max_outer_steps=2000, lbfgs_params=lbfgs_cfg, log_interval=200)
+                # 冷卻記錄
+                self.prev_strategy_step = self.last_strategy_step
+                self.last_strategy_step = self.stage_step
+                # 使用配置參數啟動L-BFGS段
+                self.train_with_lbfgs_segment()
                 if self.rank == 0:
                     print("✅ 離開 L-BFGS 段，恢復 Adam")
-                self.opt = torch.optim.Adam(list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters()), lr=current_lr, weight_decay=0.0)
-                
-                # 确保有initial_lr参数
-                for group in self.opt.param_groups:
-                    group['initial_lr'] = current_lr
-                
-                # 關鍵修復：L-BFGS結束後必須重建scheduler
+                # 提示：過於頻繁
+                try:
+                    cfg = getattr(self, 'config', None)
+                    lb = getattr(cfg.training, 'lbfgs', None) if cfg and hasattr(cfg, 'training') else None
+                    cooldown = int(getattr(lb, 'cooldown_steps', 5000)) if lb else 5000
+                    if (self.last_strategy_step - self.prev_strategy_step) < (2 * cooldown):
+                        self._log_tip_once('too_frequent', f"L-BFGS 觸發過於頻繁；建議提高 min_improve_pct 或增大 cooldown（目前 {cooldown}）。")
+                except Exception:
+                    pass
+                # 段後優化器與scheduler已在段內恢復
             # 時間追蹤和預估（只在rank 0執行；僅在需要精確計時時同步GPU）
             if self.rank == 0:
                 # 確定是否需要精確計時（與開始時相同的邏輯）

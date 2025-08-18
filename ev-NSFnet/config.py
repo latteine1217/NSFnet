@@ -26,15 +26,27 @@ class NetworkConfig:
 class LBFGSConfig:
     """L-BFGS優化器配置"""
     enabled_in_distributed: bool = True    # 分佈式模式下啟用L-BFGS
-    volatility_threshold: float = 0.01     # 波動度閾值
-    max_outer_steps: int = 2000            # 最大外循環步數
-    timeout_seconds: int = 600             # 執行超時(秒)
-    max_iter: int = 50                     # L-BFGS內部迭代數
-    history_size: int = 20                 # 歷史大小
-    tolerance_grad: float = 1e-8           # 梯度容差
-    tolerance_change: float = 1e-9         # 變化容差
-    line_search_fn: str = "strong_wolfe"   # 線搜索方法
-    checkpoint_before_lbfgs: bool = True   # L-BFGS前自動保存
+    volatility_threshold: float = 0.01     # （舊）波動度閾值（保留向後相容）
+    # 觸發條件（新）：分階段視窗與改善率門檻
+    trigger_window_per_stage: List[int] = None     # 例如 [5000, 7500, 10000]
+    min_improve_pct_per_stage: List[float] = None  # 例如 [0.02, 0.01, 0.005]
+    ema_gamma: float = 0.95                        # 改善率分母的 EMA 平滑係數
+    grad_median_abs_thresh: float = 1e-3           # 梯度絕對門檻（fp32友善）
+    grad_relative_factor: float = 0.01             # 相對門檻：< factor × g_base
+    grad_cos_ema_thresh: float = 0.9               # 梯度方向穩定閾值
+    cooldown_steps: int = 5000                     # 兩段 L-BFGS 之間冷卻步數
+    freeze_evm_during_lbfgs: bool = True           # 段內凍結 EVM
+    # 段參數（建議值）：
+    max_outer_steps: int = 200                     # 外循環步數上限
+    timeout_seconds: int = 600                     # 執行超時(秒)
+    max_iter: int = 25                             # L-BFGS內部迭代數
+    history_size: int = 20                         # 歷史大小
+    tolerance_grad: float = 1e-6                   # 梯度容差（fp32）
+    tolerance_change: float = 1e-8                 # 變化容差
+    line_search_fn: str = "strong_wolfe"           # 線搜索方法
+    early_stop_patience: int = 8                   # 內迭代連續停滯次數
+    early_stop_min_delta: float = 1e-4             # 內迭代最小改善
+    checkpoint_before_lbfgs: bool = True           # L-BFGS前自動保存
 
 @dataclass
 class TrainingConfig:
@@ -42,6 +54,7 @@ class TrainingConfig:
     N_f: int = 120000                  # 方程點數量
     batch_size: Optional[int] = None   # 批次大小 (None = 全批次)
     checkpoint_freq: int = 5000        # 檢查點保存頻率
+    log_tips: bool = True              # 訓練過程提示訊息
     sort_by_boundary_distance: bool = True  # 是否按距離邊界遠近排序方程點
     pde_distance_weighting: bool = True     # 是否啟用PDE距離權重 w(d)
     pde_distance_w_min: float = 0.2         # 權重下限，避免遠區權重為0
@@ -66,6 +79,11 @@ class TrainingConfig:
             ]
         if self.lbfgs is None:
             self.lbfgs = LBFGSConfig()
+        # 預設觸發視窗與門檻（若未設定）
+        if self.lbfgs.trigger_window_per_stage is None:
+            self.lbfgs.trigger_window_per_stage = [5000, 7500, 10000]
+        if self.lbfgs.min_improve_pct_per_stage is None:
+            self.lbfgs.min_improve_pct_per_stage = [0.02, 0.01, 0.005]
 
 @dataclass
 class PhysicsConfig:
