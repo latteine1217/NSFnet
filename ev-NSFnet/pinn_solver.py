@@ -18,11 +18,13 @@ import scipy.io
 import numpy as np
 import math
 from net import FCNet
-from typing import Dict, List, Set, Optional, Union, Callable
+from typing import Dict, List, Set, Optional, Union, Callable, Any, Tuple
 import warnings
 import time
 import datetime
 from logger import LoggerFactory, PINNLogger
+from torch.nn import Module
+from torch import Tensor
 # from health_monitor import TrainingHealthMonitor, HealthThresholds
 # from memory_manager import TrainingMemoryManager
 
@@ -32,10 +34,27 @@ from logger import LoggerFactory, PINNLogger
 warnings.filterwarnings("ignore", message=".*c10d::allreduce_.*autograd kernel.*")
 
 class PysicsInformedNeuralNetwork:
-    def _param_name_map(self, model):
+    # 類型註解
+    net: Union[FCNet, DDP]
+    net_1: Union[FCNet, DDP]
+    device: torch.device
+    logger: PINNLogger
+    tb_writer: Optional[SummaryWriter]
+    x_f: Optional[Tensor]
+    y_f: Optional[Tensor]
+    x_b: Optional[Tensor]
+    y_b: Optional[Tensor]
+    x_i: Optional[Tensor]
+    y_i: Optional[Tensor]
+    x_o: Optional[Tensor]
+    y_o: Optional[Tensor]
+    opt: Optional[torch.optim.Optimizer]
+    opt_1: Optional[torch.optim.Optimizer]
+    
+    def _param_name_map(self, model: Union[Module, DDP]) -> Dict[int, str]:
         return {id(p): n for n, p in model.named_parameters()}
 
-    def _safe_optimizer_state_dict(self, optimizer):
+    def _safe_optimizer_state_dict(self, optimizer: torch.optim.Optimizer) -> Dict[str, Any]:
         try:
             state = optimizer.state
             param_ids = set(id(p) for g in optimizer.param_groups for p in g.get('params', []))
@@ -50,7 +69,7 @@ class PysicsInformedNeuralNetwork:
         except Exception:
             return {}
 
-    def _load_optimizer_state_dict_safe(self, optimizer, opt_state):
+    def _load_optimizer_state_dict_safe(self, optimizer: torch.optim.Optimizer, opt_state: Optional[Dict[str, Any]]) -> None:
         try:
             if not opt_state:
                 return
@@ -275,9 +294,9 @@ class PysicsInformedNeuralNetwork:
         else:
             return model.parameters()
 
-    def get_model(self, model):
+    def get_model(self, model: Union[FCNet, DDP]) -> FCNet:
         """Get underlying model considering DDP wrapper"""
-        if hasattr(model, 'module'):
+        if isinstance(model, DDP):
             return model.module
         else:
             return model
@@ -384,14 +403,29 @@ class PysicsInformedNeuralNetwork:
 
     def set_boundary_data(self, X=None, time=False):
         # 接受已切片且在正確裝置上的張量，直接賦值
-        self.x_b, self.y_b, self.u_b, self.v_b = X
+        if X is None:
+            self.logger.warning("邊界數據為None，跳過設置")
+            return
+        
+        if len(X) < 4:
+            self.logger.error(f"邊界數據格式錯誤，期望至少4個元素，得到{len(X)}個")
+            return
+            
+        self.x_b, self.y_b, self.u_b, self.v_b = X[:4]
         if time and len(X) > 4:
             self.t_b = X[4]
         total_points = (self.x_b.shape[0] if isinstance(self.x_b, torch.Tensor) else 0)
-    def set_eq_training_data(self,
-                             X=None,
-                             time=False):
+        
+    def set_eq_training_data(self, X=None, time=False):
         # 接受已切片且在正確裝置上的張量，直接賦值
+        if X is None:
+            self.logger.warning("訓練數據為None，跳過設置")
+            return
+            
+        if len(X) < 2:
+            self.logger.error(f"訓練數據格式錯誤，期望至少2個元素，得到{len(X)}個")
+            return
+            
         self.x_f, self.y_f = X[:2]
         if time and len(X) > 2:
             self.t_f = X[2]
@@ -472,7 +506,7 @@ class PysicsInformedNeuralNetwork:
             # 梯度分析 (增強診斷)
             grad_norms = []
             avg_grad_norm = 0.0
-            if hasattr(self, 'opt'):
+            if hasattr(self, 'opt') and self.opt is not None:
                 for param_group in self.opt.param_groups:
                     for param in param_group['params']:
                         if param.grad is not None:
@@ -510,6 +544,9 @@ class PysicsInformedNeuralNetwork:
                     self.logger.warning(f"🌊 速度輸出過大: {velocity_max:.3f} (建議<2.0)")
                 if evm_max > 0.1:
                     self.logger.warning(f"💨 EVM輸出過大: {evm_max:.3f} (建議<0.1)")
+            
+            # 計算平均飽和率
+            avg_saturation = sum(ratio for _, ratio in saturation_info) / len(saturation_info) if saturation_info else 0.0
             
             # 整體健康狀態評估
             health_issues = []
@@ -708,7 +745,7 @@ class PysicsInformedNeuralNetwork:
         """
         計算梯度的函數 (保留原函數以兼容性)
         """
-        grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(y, device=y.device)]
+        grad_outputs: List[torch.Tensor] = [torch.ones_like(y, device=y.device)]
         grad = torch.autograd.grad(
             [y],
             x,
@@ -761,13 +798,28 @@ class PysicsInformedNeuralNetwork:
             else:
                 # 沒有邊界數據時設置損失為0，但保持在計算圖中
                 # 確保兩個網路都參與計算圖
-                if hasattr(self.net, 'module'):
-                    dummy_loss_net = torch.sum(self.net.module.layers[0].weight * 0.0)
-                    dummy_loss_net1 = torch.sum(self.net_1.module.layers[0].weight * 0.0)
+                # 獲取模型（處理DDP包裝）
+                net_model = self.get_model(self.net)
+                net1_model = self.get_model(self.net_1)
+                
+                # 獲取第一個線性層
+                first_layer = None
+                first_layer_1 = None
+                for layer in net_model.layers:
+                    if isinstance(layer, torch.nn.Linear):
+                        first_layer = layer
+                        break
+                for layer in net1_model.layers:
+                    if isinstance(layer, torch.nn.Linear):
+                        first_layer_1 = layer
+                        break
+                
+                if first_layer is not None and first_layer_1 is not None:
+                    dummy_loss_net = torch.sum(first_layer.weight * 0.0)
+                    dummy_loss_net1 = torch.sum(first_layer_1.weight * 0.0)
+                    self.loss_b = dummy_loss_net + dummy_loss_net1
                 else:
-                    dummy_loss_net = torch.sum(self.net.layers[0].weight * 0.0)
-                    dummy_loss_net1 = torch.sum(self.net_1.layers[0].weight * 0.0)
-                self.loss_b = dummy_loss_net + dummy_loss_net1
+                    self.loss_b = torch.tensor(0.0, device=self.device)
 
         # equation
         assert self.x_f is not None and self.y_f is not None
@@ -844,10 +896,15 @@ class PysicsInformedNeuralNetwork:
 
         # 跨GPU聚合損失以獲得全局損失值（僅用於日誌：使用 reduce 匯總到 rank 0）
         if self.world_size > 1:
+            # 確保loss變數是tensor類型
+            loss_b_tensor = self.loss_b if isinstance(self.loss_b, torch.Tensor) else torch.tensor(self.loss_b, device=self.device)
+            loss_e_tensor = self.loss_e if isinstance(self.loss_e, torch.Tensor) else torch.tensor(self.loss_e, device=self.device)
+            loss_s_tensor = self.loss_s if isinstance(self.loss_s, torch.Tensor) else torch.tensor(self.loss_s, device=self.device)
+            
             loss_vec = torch.stack([
-                self.loss_b.detach(),
-                self.loss_e.detach(),
-                self.loss_s.detach()
+                loss_b_tensor.detach(),
+                loss_e_tensor.detach(),
+                loss_s_tensor.detach()
             ])
             dist.reduce(loss_vec, dst=0, op=dist.ReduceOp.SUM)
             if self.rank == 0:
@@ -891,19 +948,19 @@ class PysicsInformedNeuralNetwork:
         
         # 創建用於日誌記錄的detached數值
         if hasattr(self, 'loss_e_avg'):
-            loss_e_log = self.loss_e_avg.detach().item()
+            loss_e_log = self.loss_e_avg.detach().item() if isinstance(self.loss_e_avg, torch.Tensor) else float(self.loss_e_avg)
         else:
-            loss_e_log = self.loss_e.detach().item()
+            loss_e_log = self.loss_e.detach().item() if isinstance(self.loss_e, torch.Tensor) else float(self.loss_e)
             
         if hasattr(self, 'loss_b_avg'):
-            loss_b_log = self.loss_b_avg.detach().item()
+            loss_b_log = self.loss_b_avg.detach().item() if isinstance(self.loss_b_avg, torch.Tensor) else float(self.loss_b_avg)
         else:
-            loss_b_log = self.loss_b.detach().item()
+            loss_b_log = self.loss_b.detach().item() if isinstance(self.loss_b, torch.Tensor) else float(self.loss_b)
             
         if hasattr(self, 'loss_s_avg'):
-            loss_s_log = self.loss_s_avg.detach().item()
+            loss_s_log = self.loss_s_avg.detach().item() if isinstance(self.loss_s_avg, torch.Tensor) else float(self.loss_s_avg)
         else:
-            loss_s_log = self.loss_s.detach().item()
+            loss_s_log = self.loss_s.detach().item() if isinstance(self.loss_s, torch.Tensor) else float(self.loss_s)
 
         return loss_for_backward, [loss_e_log, loss_b_log, loss_s_log, self.loss_eq1.detach().item(), self.loss_eq2.detach().item(), self.loss_eq3.detach().item(), self.loss_eq4.detach().item()]
 
@@ -1130,7 +1187,8 @@ class PysicsInformedNeuralNetwork:
                 self.freeze_evm_net(self.stage_step)
             self.lock_vis_t_minus = True
 
-            self.opt.zero_grad(set_to_none=True)
+            if self.opt is not None:
+                self.opt.zero_grad(set_to_none=True)
             params = list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters())
             lbfgs = torch.optim.LBFGS(params,
                                       max_iter=lbfgs_params.get('max_iter', 50),
@@ -1147,7 +1205,12 @@ class PysicsInformedNeuralNetwork:
             def closure():
                 lbfgs.zero_grad(set_to_none=True)
                 loss, _ = self.fwd_computing_loss_2d()
-                loss.backward()
+                if isinstance(loss, torch.Tensor):
+                    loss.backward()
+                else:
+                    # 如果是標量，轉換為tensor
+                    loss = torch.tensor(loss, requires_grad=True, device=self.device)
+                    loss.backward()
                 return loss
             
             stop_reason = "done"

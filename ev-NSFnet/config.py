@@ -8,6 +8,9 @@ from dataclasses import dataclass, asdict
 from typing import List, Tuple, Optional, Dict, Any
 import torch
 
+# 常量定義
+RESULTS_PATH = "results"  # 結果輸出路徑
+
 @dataclass
 class NetworkConfig:
     """神經網路架構配置"""
@@ -28,8 +31,8 @@ class LBFGSConfig:
     enabled_in_distributed: bool = True    # 分佈式模式下啟用L-BFGS
     volatility_threshold: float = 0.01     # （舊）波動度閾值（保留向後相容）
     # 觸發條件（新）：分階段視窗與改善率門檻
-    trigger_window_per_stage: List[int] = None     # 例如 [5000, 7500, 10000]
-    min_improve_pct_per_stage: List[float] = None  # 例如 [0.02, 0.01, 0.005]
+    trigger_window_per_stage: Optional[List[int]] = None     # 例如 [5000, 7500, 10000]
+    min_improve_pct_per_stage: Optional[List[float]] = None  # 例如 [0.02, 0.01, 0.005]
     ema_gamma: float = 0.95                        # 改善率分母的 EMA 平滑係數
     grad_median_abs_thresh: float = 1e-3           # 梯度絕對門檻（fp32友善）
     grad_relative_factor: float = 0.01             # 相對門檻：< factor × g_base
@@ -61,10 +64,10 @@ class TrainingConfig:
     pde_distance_tau: float = 0.1           # 指數權重尺度參數 tau
     
     # 訓練階段配置 (alpha_evm, epochs, learning_rate[, scheduler])
-    training_stages: List = None
+    training_stages: Optional[List[Tuple]] = None
     
     # L-BFGS配置
-    lbfgs: LBFGSConfig = None
+    lbfgs: Optional[LBFGSConfig] = None
     
     def __post_init__(self):
         if self.training_stages is None:
@@ -124,11 +127,11 @@ class ExperimentConfig:
     description: str = "Physics-Informed Neural Network for Lid-Driven Cavity Flow"
     
     # 子配置
-    network: NetworkConfig = None
-    training: TrainingConfig = None  
-    physics: PhysicsConfig = None
-    supervision: SupervisionConfig = None
-    system: SystemConfig = None
+    network: Optional[NetworkConfig] = None
+    training: Optional[TrainingConfig] = None  
+    physics: Optional[PhysicsConfig] = None
+    supervision: Optional[SupervisionConfig] = None
+    system: Optional[SystemConfig] = None
     
     def __post_init__(self):
         # 初始化子配置
