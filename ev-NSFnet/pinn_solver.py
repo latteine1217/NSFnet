@@ -1359,12 +1359,6 @@ class PysicsInformedNeuralNetwork:
                 need_precise_timing = (
                     epoch_id % 100 == 0 or               # 每100 epochs進行時間預估
                     epoch_id == 0 or                     # 首個epoch
-            # 記錄epoch開始時間（僅在需要精確計時時同步GPU）
-            if self.rank == 0:
-                # 確定是否需要精確計時
-                need_precise_timing = (
-                    epoch_id % 100 == 0 or               # 每100 epochs進行時間預估
-                    epoch_id == 0 or                     # 首個epoch
                     epoch_id == num_epoch - 1 or         # 最後epoch
                     (epoch_id + 1) % 1000 == 0           # console輸出時需要精確時間
                 )
@@ -1373,8 +1367,6 @@ class PysicsInformedNeuralNetwork:
                     try:
                         torch.cuda.synchronize(self.device)
                     except Exception:
-                        pass
-                self.epoch_start_time = time.time()
                         pass
                 self.epoch_start_time = time.time()
             
