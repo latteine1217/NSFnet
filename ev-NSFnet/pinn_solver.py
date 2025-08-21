@@ -643,12 +643,31 @@ class PysicsInformedNeuralNetwork:
         if not getattr(self, 'lock_vis_t_minus', False):
             self.vis_t_minus_gpu = torch.minimum(self.alpha_evm * nu_e_now.detach(), torch.full_like(nu_e_now, cap_val))
 
-        # NS equations - 優化：避免重複的乘法運算
+        # 座標變換 Jacobian 修正: [0,1]² → [-1,1]²
+        # x = 2X - 1, y = 2Y - 1
+        # ∂/∂X = 2 ∂/∂x, ∂²/∂X² = 4 ∂²/∂x²
+        coord_scale_1st = 2.0   # 一階導數倍數
+        coord_scale_2nd = 4.0   # 二階導數倍數
+        
+        # 應用座標變換修正
+        u_x_phys = coord_scale_1st * u_x
+        u_y_phys = coord_scale_1st * u_y
+        v_x_phys = coord_scale_1st * v_x
+        v_y_phys = coord_scale_1st * v_y
+        p_x_phys = coord_scale_1st * p_x
+        p_y_phys = coord_scale_1st * p_y
+        
+        u_xx_phys = coord_scale_2nd * u_xx
+        u_yy_phys = coord_scale_2nd * u_yy
+        v_xx_phys = coord_scale_2nd * v_xx
+        v_yy_phys = coord_scale_2nd * v_yy
+
+        # NS equations - 使用物理座標的導數
         vis_total = (1.0/self.Re + self.vis_t)
         
-        eq1 = (u*u_x + v*u_y) + p_x - vis_total*(u_xx + u_yy)
-        eq2 = (u*v_x + v*v_y) + p_y - vis_total*(v_xx + v_yy)
-        eq3 = u_x + v_y
+        eq1 = (u*u_x_phys + v*u_y_phys) + p_x_phys - vis_total*(u_xx_phys + u_yy_phys)
+        eq2 = (u*v_x_phys + v*v_y_phys) + p_y_phys - vis_total*(v_xx_phys + v_yy_phys)
+        eq3 = u_x_phys + v_y_phys
 
         # 保持熵殘差方程使用原始 e_raw（帶符號）
         residual = (eq1*(u-0.5)+eq2*(v-0.5))-e_raw
@@ -838,9 +857,9 @@ class PysicsInformedNeuralNetwork:
                 tau = float(getattr(tr, 'pde_distance_tau', 0.1))
 
             if enable_weight:
-                # d = min(x, 1-x, y, 1-y) on [0,1]^2
-                d_x = torch.minimum(self.x_f, 1.0 - self.x_f)
-                d_y = torch.minimum(self.y_f, 1.0 - self.y_f)
+                # d = min(x+1, 1-x, y+1, 1-y) on [-1,1]^2
+                d_x = torch.minimum(self.x_f + 1.0, 1.0 - self.x_f)
+                d_y = torch.minimum(self.y_f + 1.0, 1.0 - self.y_f)
                 d = torch.minimum(d_x, d_y)
                 w = w_min + (1.0 - w_min) * torch.exp(-d / max(tau, 1e-6))
                 # 規模穩定：不對w做梯度，並做均值歸一以保持量級穩定

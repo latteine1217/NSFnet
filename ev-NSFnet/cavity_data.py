@@ -29,9 +29,9 @@ class DataLoader:
         N_b: Num of boundary points
         '''
         self.N_b = N_b
-        self.x_min = 0.0
+        self.x_min = -1.0
         self.x_max = 1.0
-        self.y_min = 0.0
+        self.y_min = -1.0
         self.y_max = 1.0
         self.N_f = N_f # equation points
         self.pts_bc = None
@@ -45,7 +45,7 @@ class DataLoader:
         r_const = 50
 
         upper_x = np.linspace(self.x_min, self.x_max, num=Nx)
-        u_upper = 1 -  np.cosh(r_const*(upper_x-0.5)) / np.cosh(r_const*0.5)
+        u_upper = 1 -  np.cosh(r_const*(upper_x-0.0)) / np.cosh(r_const*1.0)
         #  lower upper left right
         x_b = np.concatenate([np.linspace(self.x_min, self.x_max, num=Nx),
                               np.linspace(self.x_min, self.x_max, num=Nx),
@@ -102,6 +102,11 @@ class DataLoader:
         u = data['U_ref']
         v = data['V_ref']
         p = data['P_ref']
+        
+        # 座標變換: [0,1] → [-1,1]
+        x = 2 * x - 1
+        y = 2 * y - 1
+        
         x_star = x.reshape(-1,1)
         y_star = y.reshape(-1,1)
         u_star = u.reshape(-1,1)
@@ -136,6 +141,10 @@ class DataLoader:
         u = data['U_ref']
         v = data['V_ref']
         p = data['P_ref']
+        
+        # 座標變換: [0,1] → [-1,1]
+        x = 2 * x - 1
+        y = 2 * y - 1
         
         # 展平数据
         x_flat = x.reshape(-1)
@@ -197,8 +206,8 @@ class DataLoader:
             print(f'   壓力: p = {p_sup[i,0]:>8.6f}')
             
             # 計算與計算域中心和邊界的距離
-            center_dist = np.sqrt((x_sup[i,0] - 0.5)**2 + (y_sup[i,0] - 0.5)**2)
-            boundary_dist = min(x_sup[i,0], 1-x_sup[i,0], y_sup[i,0], 1-y_sup[i,0])
+            center_dist = np.sqrt((x_sup[i,0] - 0.0)**2 + (y_sup[i,0] - 0.0)**2)
+            boundary_dist = min(x_sup[i,0]+1, 1-x_sup[i,0], y_sup[i,0]+1, 1-y_sup[i,0])
             
             print(f'   距中心: {center_dist:>8.6f}')
             print(f'   距邊界: {boundary_dist:>8.6f}')

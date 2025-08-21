@@ -7,9 +7,9 @@ network:
   hidden_size: 80
   hidden_size_1: 40
   # 首/末層縮放與EVM激活
-  first_layer_scale_main: 1.5
-  last_layer_scale_main: 0.66
-  first_layer_scale_evm: 1.2
+  first_layer_scale_main: 2.0
+  last_layer_scale_main: 0.6
+  first_layer_scale_evm: 2.0
   last_layer_scale_evm: 0.1
   evm_output_activation: softplus_cap
 
