@@ -340,7 +340,7 @@ def main():
 
             # 根據策略決定調度器（由配置指定）
             stage_scheduler = None
-            if sched_name not in ['Constant','MultiStepLR','CosineAnnealingLR']:
+            if sched_name not in ['Constant','MultiStepLR','CosineAnnealingLR','CosineAnnealingWarmRestarts','SGDR']:
                 if not is_distributed or PINN.rank == 0:
                     print(f"   - 未知調度器 {sched_name}，回退 Constant")
                 sched_name = 'Constant'
@@ -359,6 +359,46 @@ def main():
                 if not is_distributed or PINN.rank == 0:
                     print(f"   - 啟用 CosineAnnealingLR: T_max={num_epochs}, eta_min={eta_min:.2e}")
                 stage_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(PINN.opt, T_max=num_epochs, eta_min=eta_min)
+            elif sched_name in ['CosineAnnealingWarmRestarts', 'SGDR']:
+                # SGDR: CosineAnnealingWarmRestarts + Warmup (LinearLR)
+                sgdr_cfg = getattr(config.training, 'sgdr', None)
+                # 預設暖啟動步數為階段的5%，限制在[500, 10000]
+                default_warmup = max(500, int(0.05 * num_epochs))
+                default_warmup = min(default_warmup, 10000)
+                warmup_epochs = int(getattr(sgdr_cfg, 'warmup_epochs', default_warmup) if sgdr_cfg else default_warmup)
+                # 預設第一個週期長度（不含暖啟動）
+                remain = max(1, num_epochs - warmup_epochs)
+                default_T0 = max(1000, int(0.25 * remain))
+                T_0 = int(getattr(sgdr_cfg, 'T_0', default_T0) if sgdr_cfg else default_T0)
+                T_mult = int(getattr(sgdr_cfg, 'T_mult', 2) if sgdr_cfg else 2)
+                # eta_min 使用下一階段lr或當前lr的10%
+                if stage_idx < len(training_stages) - 1:
+                    eta_min = training_stages[stage_idx + 1][2]
+                else:
+                    eta_min = max(learning_rate * 0.1, 1e-8)
+                eta_min = float(getattr(sgdr_cfg, 'eta_min', eta_min) if sgdr_cfg else eta_min)
+                start_factor = float(getattr(sgdr_cfg, 'start_factor', 0.1) if sgdr_cfg else 0.1)
+                end_factor = float(getattr(sgdr_cfg, 'end_factor', 1.0) if sgdr_cfg else 1.0)
+                if not is_distributed or PINN.rank == 0:
+                    print(f"   - 啟用 SGDR: warmup={warmup_epochs}, T_0={T_0}, T_mult={T_mult}, eta_min={eta_min:.2e}")
+                # 建立 SequentialLR: LinearLR (warmup) -> CosineAnnealingWarmRestarts
+                warmup_sched = torch.optim.lr_scheduler.LinearLR(
+                    PINN.opt,
+                    start_factor=start_factor,
+                    end_factor=end_factor,
+                    total_iters=warmup_epochs
+                )
+                cawr_sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                    PINN.opt,
+                    T_0=T_0,
+                    T_mult=T_mult,
+                    eta_min=eta_min
+                )
+                stage_scheduler = torch.optim.lr_scheduler.SequentialLR(
+                    PINN.opt,
+                    schedulers=[warmup_sched, cawr_sched],
+                    milestones=[warmup_epochs]
+                )
 
             # 訓練當前階段
             start_time = time.time()

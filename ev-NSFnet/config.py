@@ -77,6 +77,9 @@ class TrainingConfig:
     
     # 訓練階段配置 (alpha_evm, epochs, learning_rate[, scheduler])
     training_stages: Optional[List[Tuple]] = None
+    # SGDR（CosineAnnealingWarmRestarts + warmup）參數（可選）
+    # 可選鍵：warmup_epochs, T_0, T_mult, eta_min, start_factor, end_factor
+    sgdr: Optional[Dict[str, Any]] = None
     
     # L-BFGS配置
     lbfgs: Optional[LBFGSConfig] = None

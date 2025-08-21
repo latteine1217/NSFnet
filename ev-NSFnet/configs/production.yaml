@@ -8,9 +8,9 @@ network:
   hidden_size_1: 40
   # 首/末層縮放與EVM激活
   first_layer_scale_main: 1.5
-  last_layer_scale_main: 0.6
+  last_layer_scale_main: 0.66
   first_layer_scale_evm: 1.2
-  last_layer_scale_evm: 0.5
+  last_layer_scale_evm: 0.1
   evm_output_activation: softplus_cap
 
 training:
@@ -24,13 +24,20 @@ training:
   pde_distance_w_min: 0.2            # 權重下限，避免遠區為0
   pde_distance_tau: 0.1              # 距離尺度 (越小越聚焦邊界)
   training_stages:
-    - [0.05, 150000, 1e-3, Constant]            # Stage 1
-    - [0.03, 150000, 1e-3, CosineAnnealingLR]   # Stage 2
-    - [0.01, 200000, 2e-4, CosineAnnealingLR]   # Stage 3
-    - [0.005, 200000, 4e-5, CosineAnnealingLR]   # Stage 4
-    - [0.002, 200000, 1e-5, CosineAnnealingLR]  # Stage 5
-    - [0.001, 200000, 2e-6, Constant]          # Stage 6
-  
+    - [0.05, 225000, 1e-3, SGDR]            # Stage 1
+    - [0.01, 225000, 2e-4, SGDR]                # Stage 2
+    - [0.005, 225000, 4e-5, SGDR]               # Stage 3
+    - [0.002, 225000, 1e-5, SGDR]               # Stage 4
+    - [0.001, 100000, 2e-6, Constant]           # Stage 5
+  # SGDR scheduler parameters (optional)
+  sgdr:
+    warmup_epochs: 5000     # 緩啟動步數（每stage計數）
+    T_0: 30000              # 第一個週期長度（不含warmup）
+    T_mult: 2               # 週期倍增
+    start_factor: 0.1       # 暖啟動起始比例
+    end_factor: 1.0         # 暖啟動結束比例
+    eta_min: 1e-6
+
   # L-BFGS相關配置
   lbfgs:
     enabled_in_distributed: true      # 啟用分佈式L-BFGS

@@ -1380,8 +1380,54 @@ class PysicsInformedNeuralNetwork:
                 'eta_min': getattr(scheduler, 'eta_min', None),
                 'milestones': getattr(scheduler, 'milestones', None),
                 'gamma': getattr(scheduler, 'gamma', None),
-                'last_epoch': scheduler.last_epoch
+                'last_epoch': getattr(scheduler, 'last_epoch', -1)
             }
+            # 額外支援：CosineAnnealingWarmRestarts 與 SequentialLR（暖啟動）
+            try:
+                import torch as _torch
+                # CosineAnnealingWarmRestarts 參數
+                if isinstance(scheduler, _torch.optim.lr_scheduler.CosineAnnealingWarmRestarts):
+                    self.current_scheduler_params.update({
+                        'T_0': getattr(scheduler, 'T_0', None),
+                        'T_mult': getattr(scheduler, 'T_mult', 1),
+                        'eta_min': getattr(scheduler, 'eta_min', 0.0)
+                    })
+                # SequentialLR: 保存子scheduler配置
+                if isinstance(scheduler, _torch.optim.lr_scheduler.SequentialLR):
+                    sub_schedulers = getattr(scheduler, '_schedulers', [])
+                    children = []
+                    for sub in sub_schedulers:
+                        entry = {'class': type(sub)}
+                        if isinstance(sub, _torch.optim.lr_scheduler.LinearLR):
+                            entry.update({
+                                'start_factor': getattr(sub, 'start_factor', 1.0),
+                                'end_factor': getattr(sub, 'end_factor', 1.0),
+                                'total_iters': getattr(sub, 'total_iters', 0)
+                            })
+                        elif isinstance(sub, _torch.optim.lr_scheduler.CosineAnnealingWarmRestarts):
+                            entry.update({
+                                'T_0': getattr(sub, 'T_0', None),
+                                'T_mult': getattr(sub, 'T_mult', 1),
+                                'eta_min': getattr(sub, 'eta_min', 0.0)
+                            })
+                        elif isinstance(sub, _torch.optim.lr_scheduler.CosineAnnealingLR):
+                            entry.update({
+                                'T_max': getattr(sub, 'T_max', None),
+                                'eta_min': getattr(sub, 'eta_min', 0.0)
+                            })
+                        elif isinstance(sub, _torch.optim.lr_scheduler.MultiStepLR):
+                            entry.update({
+                                'milestones': list(getattr(sub, 'milestones', [])),
+                                'gamma': getattr(sub, 'gamma', 0.1)
+                            })
+                        children.append(entry)
+                    self.current_scheduler_params.update({
+                        'sequential': True,
+                        'children': children,
+                        'milestones': list(getattr(scheduler, 'milestones', []))
+                    })
+            except Exception:
+                pass
             
             # Debug輸出確認scheduler參數
             if self.rank == 0:
@@ -1395,6 +1441,11 @@ class PysicsInformedNeuralNetwork:
                     print(f"🔧 Scheduler初始化: {scheduler_name}")
                     print(f"   - milestones: {scheduler.milestones}")
                     print(f"   - gamma: {scheduler.gamma}")
+                elif scheduler_name == 'CosineAnnealingWarmRestarts':
+                    print(f"🔧 Scheduler初始化: {scheduler_name}")
+                    print(f"   - T_0: {getattr(scheduler,'T_0', None)}  T_mult: {getattr(scheduler,'T_mult', 1)}  eta_min: {getattr(scheduler,'eta_min', 0.0):.2e}")
+                elif scheduler_name == 'SequentialLR':
+                    print(f"🔧 Scheduler初始化: {scheduler_name} (包含warmup/SGDR)")
                 else:
                     print(f"🔧 Scheduler初始化: {scheduler_name}")
         
@@ -1917,6 +1968,74 @@ class PysicsInformedNeuralNetwork:
                 
                 if self.rank == 0:
                     print(f"  ✅ 重建MultiStepLR: 保持lr={current_lr:.6f}, stage_epoch={stage_epoch}")
+            elif scheduler_class.__name__ == 'CosineAnnealingWarmRestarts':
+                # 重建CAWR，保持學習率連續性
+                T_0 = self.current_scheduler_params.get('T_0', 1000)
+                T_mult = self.current_scheduler_params.get('T_mult', 1)
+                eta_min = self.current_scheduler_params.get('eta_min', 0.0)
+                self.current_scheduler = scheduler_class(
+                    self.opt,
+                    T_0=T_0,
+                    T_mult=T_mult,
+                    eta_min=eta_min
+                )
+                # 手動設置學習率保持連續性
+                for group in self.opt.param_groups:
+                    group['lr'] = current_lr
+                stage_epoch = self.stage_step if hasattr(self, 'stage_step') else 0
+                self.current_scheduler.last_epoch = stage_epoch - 1
+                if self.rank == 0:
+                    print(f"  ✅ 重建CosineAnnealingWarmRestarts: 保持lr={current_lr:.6f}, stage_epoch={stage_epoch}")
+            elif scheduler_class.__name__ == 'SequentialLR':
+                # 重建順序調度器：支援 LinearLR -> CosineAnnealingWarmRestarts 組合
+                children = self.current_scheduler_params.get('children', [])
+                rebuilt = []
+                import torch as _torch
+                for ch in children:
+                    cls = ch.get('class')
+                    name = cls.__name__ if hasattr(cls, '__name__') else str(cls)
+                    if name == 'LinearLR':
+                        rebuilt.append(_torch.optim.lr_scheduler.LinearLR(
+                            self.opt,
+                            start_factor=ch.get('start_factor', 1.0),
+                            end_factor=ch.get('end_factor', 1.0),
+                            total_iters=ch.get('total_iters', 0)
+                        ))
+                    elif name == 'CosineAnnealingWarmRestarts':
+                        rebuilt.append(_torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                            self.opt,
+                            T_0=ch.get('T_0', 1000),
+                            T_mult=ch.get('T_mult', 1),
+                            eta_min=ch.get('eta_min', 0.0)
+                        ))
+                    elif name == 'CosineAnnealingLR':
+                        rebuilt.append(_torch.optim.lr_scheduler.CosineAnnealingLR(
+                            self.opt,
+                            T_max=ch.get('T_max', 1000),
+                            eta_min=ch.get('eta_min', 0.0)
+                        ))
+                    elif name == 'MultiStepLR':
+                        rebuilt.append(_torch.optim.lr_scheduler.MultiStepLR(
+                            self.opt,
+                            milestones=ch.get('milestones', []),
+                            gamma=ch.get('gamma', 0.1)
+                        ))
+                    else:
+                        # 不認識的子scheduler，回退為恆定
+                        rebuilt.append(_torch.optim.lr_scheduler.ConstantLR(self.opt, factor=1.0, total_iters=1))
+                ms = self.current_scheduler_params.get('milestones', [0])
+                self.current_scheduler = _torch.optim.lr_scheduler.SequentialLR(
+                    self.opt,
+                    schedulers=rebuilt,
+                    milestones=ms
+                )
+                # 保持當前學習率與進度
+                for group in self.opt.param_groups:
+                    group['lr'] = current_lr
+                stage_epoch = self.stage_step if hasattr(self, 'stage_step') else 0
+                self.current_scheduler.last_epoch = stage_epoch - 1
+                if self.rank == 0:
+                    print(f"  ✅ 重建SequentialLR: 保持lr={current_lr:.6f}, stage_epoch={stage_epoch}")
             else:
                 # 对于其他类型的scheduler，尝试通用重建
                 self.current_scheduler = scheduler_class(self.opt)
