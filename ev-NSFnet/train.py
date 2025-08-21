@@ -433,7 +433,7 @@ def main():
                         print(f"✅ {stage_name}: L-BFGS 段完成，恢復 Adam")
                 remaining = num_epochs - start_epoch
                 if remaining > 0:
-                    PINN.train(num_epoch=remaining, lr=learning_rate, scheduler=None, profiler=_Noop(), start_epoch=start_epoch)
+                    PINN.train(num_epoch=remaining, lr=learning_rate, scheduler=stage_scheduler, profiler=_Noop(), start_epoch=start_epoch)
             else:
                 if do_profile:
                     with torch.profiler.profile(

@@ -992,7 +992,15 @@ class PysicsInformedNeuralNetwork:
               profiler=None,
               start_epoch=0):
         if self.opt is not None:
-            self.opt.param_groups[0]['lr'] = lr
+            # 如果有scheduler，特別是SequentialLR（SGDR），不覆蓋其設置的學習率
+            if scheduler is not None and hasattr(scheduler, '_schedulers'):
+                # SequentialLR情況：讓scheduler控制學習率
+                if self.rank == 0:
+                    current_lr = self.opt.param_groups[0]['lr']
+                    print(f"🔧 檢測到SequentialLR scheduler，保持當前lr: {current_lr:.6f}，不覆蓋為: {lr:.6f}")
+            else:
+                # 無scheduler或非SequentialLR：正常設置學習率
+                self.opt.param_groups[0]['lr'] = lr
         return self.solve_Adam(self.fwd_computing_loss_2d, num_epoch, batchsize, scheduler, profiler, start_epoch)
 
     def _stage_group_index(self) -> int:
