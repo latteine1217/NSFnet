@@ -7,10 +7,10 @@ network:
   hidden_size: 80
   hidden_size_1: 40
   # 首/末層縮放與EVM激活
-  first_layer_scale_main: 2.0
-  last_layer_scale_main: 0.5
+  first_layer_scale_main: 1.5
+  last_layer_scale_main: 0.6
   first_layer_scale_evm: 1.2
-  last_layer_scale_evm: 0.1
+  last_layer_scale_evm: 0.5
   evm_output_activation: softplus_cap
 
 training:
@@ -34,13 +34,25 @@ training:
   # L-BFGS相關配置
   lbfgs:
     enabled_in_distributed: true      # 啟用分佈式L-BFGS
-    # 新觸發條件：分階段視窗+改善率（更穩健）
+    
+    # 階段控制：從Stage 3開始才啟用L-BFGS
+    enable_from_stage: 3
+    
+    # 放寬的觸發條件：分階段視窗+改善率
     trigger_window_per_stage: [5000, 7500, 10000]
-    min_improve_pct_per_stage: [0.02, 0.01, 0.005]
+    min_improve_pct_per_stage: [0.02, 0.03, 0.015]  # Stage 3-4放寬到3%，Stage 5-6放寬到1.5%
     ema_gamma: 0.95
-    grad_median_abs_thresh: 0.001
-    grad_relative_factor: 0.01
+    
+    # 簡化的梯度條件
+    use_simple_grad_check: true
+    grad_median_abs_thresh: 0.002      # 放寬到2e-3
+    grad_relative_factor: 0.02         # 放寬到2%
     grad_cos_ema_thresh: 0.9
+    
+    # 放寬的物理條件
+    alpha_evm_threshold: 0.02          # 放寬到0.02
+    cap_ratio_threshold: 0.7           # 放寬到0.7
+    
     cooldown_steps: 5000
     freeze_evm_during_lbfgs: true
     # L-BFGS 段參數（P100 友善）
@@ -57,7 +69,7 @@ training:
 
 physics:
   Re: 5000
-  alpha_evm: 0.03
+  alpha_evm: 0.05
   beta: 5.0
   bc_weight: 10.0
   eq_weight: 1.0

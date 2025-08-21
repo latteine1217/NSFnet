@@ -1012,9 +1012,33 @@ class PysicsInformedNeuralNetwork:
         if lbfgs_cfg and not lbfgs_cfg.enabled_in_distributed and self.world_size > 1:
             return False
 
-        # 冷卻
+        # 階段檢查：只在Stage 3+才允許L-BFGS觸發
+        group_idx = self._stage_group_index()
+        enable_from_stage = getattr(lbfgs_cfg, 'enable_from_stage', 3) if lbfgs_cfg else 3
+        current_stage_num = 1
+        try:
+            name = str(self.current_stage)
+            if 'Stage' in name:
+                current_stage_num = int(name.split()[-1])
+        except Exception:
+            current_stage_num = 1
+        
+        if current_stage_num < enable_from_stage:
+            return False
+
+         # 冷卻檢查（使用相對步數解決階段切換問題）
         cooldown = getattr(lbfgs_cfg, 'cooldown_steps', 5000) if lbfgs_cfg else 5000
-        if (self.stage_step - self.last_strategy_step) < cooldown:
+        
+        # 獲取當前階段起始步數，確保相對步數計算正確
+        stage_start_step = getattr(self, 'stage_start_step', 0)
+        current_relative_step = self.stage_step - stage_start_step
+        last_strategy_relative_step = self.last_strategy_step - stage_start_step
+        
+        # 使用相對步數檢查冷卻
+        if (current_relative_step - last_strategy_relative_step) < cooldown:
+            # Debug: 偶爾輸出冷卻狀態（每5000步一次）
+            if self.rank == 0 and self.stage_step % 5000 == 0:
+                print(f"[L-BFGS冷卻] 當前相對步數:{current_relative_step}, 上次觸發相對步數:{last_strategy_relative_step}, 冷卻需求:{cooldown}")
             return False
 
         # 需要足夠的滑窗
@@ -1035,22 +1059,34 @@ class PysicsInformedNeuralNetwork:
             denom = max(self._compute_ema(losses[-W:], gamma), 1e-12)
             r = (L_w - L_t) / denom
 
-            # 梯度條件
-            grad_med = float(getattr(self, 'grad_median', 1e9))
-            grad_iqr = float(getattr(self, 'grad_iqr', 0.0))
-            grad_iqr_ratio = grad_iqr / (grad_med + 1e-12)
-            g_base = float(getattr(self, 'grad_baseline', grad_med))
-            rel_ok = grad_med < (getattr(lbfgs_cfg, 'grad_relative_factor', 0.01) * g_base) if lbfgs_cfg else False
-            abs_ok = grad_med < (getattr(lbfgs_cfg, 'grad_median_abs_thresh', 1e-3) if lbfgs_cfg else 1e-3)
-            cos_ema = float(getattr(self, 'grad_cos_ema', 0.0))
-            cos_ok = cos_ema > (getattr(lbfgs_cfg, 'grad_cos_ema_thresh', 0.9) if lbfgs_cfg else 0.9)
+            # 梯度條件（簡化）
+            use_simple_grad_check = getattr(lbfgs_cfg, 'use_simple_grad_check', True) if lbfgs_cfg else True
+            
+            if use_simple_grad_check:
+                # 簡化的梯度檢查：只需要滿足絕對值或相對改善條件
+                grad_med = float(getattr(self, 'grad_median', 1e9))
+                g_base = float(getattr(self, 'grad_baseline', grad_med))
+                rel_ok = grad_med < (getattr(lbfgs_cfg, 'grad_relative_factor', 0.02) * g_base) if lbfgs_cfg else False  # 放寬到2%
+                abs_ok = grad_med < (getattr(lbfgs_cfg, 'grad_median_abs_thresh', 2e-3) if lbfgs_cfg else 2e-3)  # 放寬到2e-3
+                grad_ok = abs_ok or rel_ok
+            else:
+                # 原始複雜梯度檢查
+                grad_med = float(getattr(self, 'grad_median', 1e9))
+                grad_iqr = float(getattr(self, 'grad_iqr', 0.0))
+                grad_iqr_ratio = grad_iqr / (grad_med + 1e-12)
+                g_base = float(getattr(self, 'grad_baseline', grad_med))
+                rel_ok = grad_med < (getattr(lbfgs_cfg, 'grad_relative_factor', 0.01) * g_base) if lbfgs_cfg else False
+                abs_ok = grad_med < (getattr(lbfgs_cfg, 'grad_median_abs_thresh', 1e-3) if lbfgs_cfg else 1e-3)
+                cos_ema = float(getattr(self, 'grad_cos_ema', 0.0))
+                cos_ok = cos_ema > (getattr(lbfgs_cfg, 'grad_cos_ema_thresh', 0.9) if lbfgs_cfg else 0.9)
+                grad_ok = (abs_ok or rel_ok) and (grad_iqr_ratio < 5.0 or cos_ok)
 
-            grad_ok = (abs_ok or rel_ok) and (grad_iqr_ratio < 5.0 or cos_ok)
-
-            # 物理條件：α_evm小、黏滯使用率不貼頂
-            alpha_ok = self.alpha_evm <= 0.01
+            # 物理條件（放寬）
+            alpha_threshold = getattr(lbfgs_cfg, 'alpha_evm_threshold', 0.02) if lbfgs_cfg else 0.02  # 放寬到0.02
+            alpha_ok = self.alpha_evm <= alpha_threshold
             cap_ratio_p95 = float(getattr(self, 'vis_cap_p95', 0.0))  # 由訓練循環維護
-            phys_ok = cap_ratio_p95 < 0.5
+            cap_threshold = getattr(lbfgs_cfg, 'cap_ratio_threshold', 0.7) if lbfgs_cfg else 0.7  # 放寬到0.7
+            phys_ok = cap_ratio_p95 < cap_threshold
 
             trigger_lbfgs = (r <= min_r) and grad_ok and alpha_ok and phys_ok
 
@@ -1406,8 +1442,9 @@ class PysicsInformedNeuralNetwork:
         # 滑窗與步數計數
         if not hasattr(self, 'global_step'):
             self.global_step = 0
-        # 關鍵修復：每個新階段都重置stage_step
+        # 關鍵修復：每個新階段都重置stage_step，並記錄階段起始步數
         self.stage_step = start_epoch  # 從start_epoch開始，而不是0
+        self.stage_start_step = start_epoch  # 記錄當前階段起始步數，用於相對步數計算
         
         from collections import deque
         if not hasattr(self, 'stage_loss_deque') or self.stage_step == 0:
@@ -1614,12 +1651,15 @@ class PysicsInformedNeuralNetwork:
                 self.train_with_lbfgs_segment()
                 if self.rank == 0:
                     print("✅ 離開 L-BFGS 段，恢復 Adam")
-                # 提示：過於頻繁
+                # 提示：過於頻繁（使用相對步數）
                 try:
                     cfg = getattr(self, 'config', None)
                     lb = getattr(cfg.training, 'lbfgs', None) if cfg and hasattr(cfg, 'training') else None
                     cooldown = int(getattr(lb, 'cooldown_steps', 5000)) if lb else 5000
-                    if (self.last_strategy_step - self.prev_strategy_step) < (2 * cooldown):
+                    stage_start_step = getattr(self, 'stage_start_step', 0)
+                    current_relative_step = self.last_strategy_step - stage_start_step
+                    prev_relative_step = self.prev_strategy_step - stage_start_step
+                    if (current_relative_step - prev_relative_step) < (2 * cooldown):
                         self._log_tip_once('too_frequent', f"L-BFGS 觸發過於頻繁；建議提高 min_improve_pct 或增大 cooldown（目前 {cooldown}）。")
                 except Exception:
                     pass

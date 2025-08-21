@@ -30,13 +30,25 @@ class LBFGSConfig:
     """L-BFGS優化器配置"""
     enabled_in_distributed: bool = True    # 分佈式模式下啟用L-BFGS
     volatility_threshold: float = 0.01     # （舊）波動度閾值（保留向後相容）
+    
+    # 階段控制
+    enable_from_stage: int = 3              # 從第幾個Stage開始啟用L-BFGS
+    
     # 觸發條件（新）：分階段視窗與改善率門檻
     trigger_window_per_stage: Optional[List[int]] = None     # 例如 [5000, 7500, 10000]
-    min_improve_pct_per_stage: Optional[List[float]] = None  # 例如 [0.02, 0.01, 0.005]
+    min_improve_pct_per_stage: Optional[List[float]] = None  # 例如 [0.02, 0.03, 0.015]
     ema_gamma: float = 0.95                        # 改善率分母的 EMA 平滑係數
-    grad_median_abs_thresh: float = 1e-3           # 梯度絕對門檻（fp32友善）
-    grad_relative_factor: float = 0.01             # 相對門檻：< factor × g_base
+    
+    # 簡化梯度條件
+    use_simple_grad_check: bool = True             # 使用簡化的梯度檢查
+    grad_median_abs_thresh: float = 2e-3           # 梯度絕對門檻（放寬）
+    grad_relative_factor: float = 0.02             # 相對門檻：< factor × g_base（放寬）
     grad_cos_ema_thresh: float = 0.9               # 梯度方向穩定閾值
+    
+    # 物理條件（放寬）
+    alpha_evm_threshold: float = 0.02              # alpha_evm閾值（放寬）
+    cap_ratio_threshold: float = 0.7               # 黏滯使用率閾值（放寬）
+    
     cooldown_steps: int = 5000                     # 兩段 L-BFGS 之間冷卻步數
     freeze_evm_during_lbfgs: bool = True           # 段內凍結 EVM
     # 段參數（建議值）：

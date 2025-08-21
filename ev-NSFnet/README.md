@@ -132,54 +132,78 @@ training:
 ```
 
 
-### 🔬 L-BFGS 精修（更新）
-- 觸發條件：分階段視窗 + EMA 相對改善 + 梯度/物理條件 + 冷卻
-  - 視窗/門檻（Stage 1–2/3–4/5–6）：`[5000, 7500, 10000]`、min improve `[0.02, 0.01, 0.005]`
+### 🔬 L-BFGS 精修（更新 - 階段化觸發與放寬限制）
+
+#### 🎯 新觸發策略 (2025-08-21)
+- **階段控制**: **僅在Stage 3+啟用**，避免早期階段不穩定觸發
+- **分階段視窗 + EMA相對改善 + 簡化條件 + 冷卻**:
+  - 視窗/門檻（Stage 3–4/5–6）：`[7500, 10000]`、放寬 min improve `[0.03, 0.015]`
   - 相對改善率：`r = (L[t−W] − L[t]) / EMA_γ(L[t−W..t])`，`γ=0.95`
-  - 梯度條件（二選一）：`median(||∇θL||) < 1e-3` 或 `median < 1% × g_base`（前5k步中位數為基準）；再搭配 `IQR/median < 5` 或 `cos(g_t,g_{t-1})` 的 EMA > 0.9
-  - 物理條件：`α_evm ≤ 0.01` 且 `P95(ν_E)/(β/Re) < 0.5`
-  - 冷卻：兩段 L-BFGS 間隔 `cooldown_steps=5000`
-- 段內策略：`freeze EVM`、鎖定 `vis_t_minus`、停用 scheduler、使用 `fp32`
-- 段參數（P100 友善）：
+  - **簡化梯度條件**: `median(||∇θL||) < 2e-3` OR `median < 2% × g_base`（移除複雜的IQR/cos條件）
+  - **放寬物理條件**: `α_evm ≤ 0.02` 且 `P95(ν_E)/(β/Re) < 0.7`
+  - 冷卻：兩段 L-BFGS 間隔 `cooldown_steps=5000`（使用相對步數修復階段切換問題）
+
+#### 🏗️ 執行策略與參數
+- **段內策略**: `freeze EVM`、鎖定 `vis_t_minus`、停用 scheduler、使用 `fp32`
+- **段參數（P100 友善）**：
   - `max_outer_steps: 200`、`timeout_seconds: 600`
   - `max_iter: 25`、`history_size: 20`
   - `tolerance_grad: 1e-6`、`tolerance_change: 1e-8`
   - `line_search_fn: strong_wolfe`、內迭代早停：連續 `8` 次改善 < `1e-4` 則結束
-- 段後：恢復 Adam、解鎖 `vis_t_minus`、解凍 EVM、重建 scheduler，繼續當前 stage
+- **段後**: 恢復 Adam、解鎖 `vis_t_minus`、解凍 EVM、重建 scheduler，繼續當前 stage
 
-配置範例（training.lbfgs）：
+#### 🔧 配置範例（training.lbfgs）：
 ```yaml
 training:
   lbfgs:
+    # 階段控制：從Stage 3開始才啟用L-BFGS
+    enable_from_stage: 3
+    
+    # 放寬的觸發條件
     trigger_window_per_stage: [5000, 7500, 10000]
-    min_improve_pct_per_stage: [0.02, 0.01, 0.005]
+    min_improve_pct_per_stage: [0.02, 0.03, 0.015]  # Stage 3-4放寬到3%，Stage 5-6放寬到1.5%
     ema_gamma: 0.95
-    grad_median_abs_thresh: 0.001
-    grad_relative_factor: 0.01
-    grad_cos_ema_thresh: 0.9
+    
+    # 簡化的梯度條件
+    use_simple_grad_check: true
+    grad_median_abs_thresh: 0.002      # 放寬到2e-3
+    grad_relative_factor: 0.02         # 放寬到2%
+    
+    # 放寬的物理條件
+    alpha_evm_threshold: 0.02          # 放寬到0.02
+    cap_ratio_threshold: 0.7           # 放寬到0.7
+    
     cooldown_steps: 5000
     freeze_evm_during_lbfgs: true
-    max_outer_steps: 200
-    timeout_seconds: 600
-    max_iter: 25
-    history_size: 20
-    tolerance_grad: 1e-6
-    tolerance_change: 1e-8
-    line_search_fn: strong_wolfe
-    early_stop_patience: 8
-    early_stop_min_delta: 1e-4
+    # L-BFGS段參數保持不變...
 ```
 
+#### ✅ 預期改善效果
+- **Stage 1-2**: 🚫 完全禁用，專注Adam基礎訓練
+- **Stage 3-4**: ✅ 大幅提高觸發機會（3%改善率 vs 原1%）
+- **Stage 5-6**: ✅ 頻繁精修（1.5%改善率 vs 原0.5%）
+- **整體**: 💪 更實用的L-BFGS精修機制，避免過度保守
+
 ## 🧯 Troubleshooting
-- L-BFGS 不觸發: 窗口不足或冷卻未滿；降低 `min_improve_pct_per_stage`、放寬 `grad_median_abs_thresh`，或縮短 `cooldown_steps`。確認 `α_evm ≤ 0.01` 且 `P95(ν_E)/(β/Re) < 0.5`。
-- L-BFGS 過於頻繁: 提高 `min_improve_pct_per_stage`、增大 `cooldown_steps`，並提高 `grad_cos_ema_thresh` 以要求方向更穩定。
-- L-BFGS 段內發散/NaN: 降低 `max_iter`→20、放寬 `tolerance_grad`→1e-5、縮短 `timeout_seconds`；確保段內 FP32。仍不穩時可暫關 line search 或先做數千步 Adam。
-- 段後學習率異常: 段後自動重建 scheduler；若曲線仍平坦，檢查日誌中的重建訊息與 `Training/LearningRate` 曲線。
-- 人工黏滯常貼上限: 降低 `last_layer_scale_evm`（如 0.05）或 `alpha_evm`；避免一味增大 β 以免偏黏。
-- tanh 飽和/梯度尖峰: 降低 `first_layer_scale_main`→2.0 並確保 (x,y)∈[-1,1]；觀察 `NetworkHealth/Saturation_*`。
-- PDE loss 長期停滯: 提高 `last_layer_scale_main`→0.6–0.7；或早期短暫提高學習率/延長暖身。
-- DDP 權重不一致: 確認首/末層縮放在 DDP 包裹前完成（本專案已於建構時處理）；自定流程務必維持此順序。
-- AMP 數值問題: L-BFGS 段全程 FP32；cap 使用 `torch.full_like(nu_e, float(β)/float(Re))` 以對齊 dtype/裝置。
+
+### L-BFGS相關問題
+- **L-BFGS 不觸發**: 
+  - 檢查階段：僅Stage 3+啟用，Stage 1-2會完全禁用
+  - 窗口不足或冷卻未滿：確認`stage_loss_deque`累積足夠數據
+  - 改善率過嚴：降低 `min_improve_pct_per_stage`（Stage 3-4建議3%，Stage 5-6建議1.5%）
+  - 梯度條件：放寬 `grad_median_abs_thresh`到2e-3，`grad_relative_factor`到2%
+  - 物理條件：確認 `α_evm ≤ 0.02` 且 `P95(ν_E)/(β/Re) < 0.7`
+  - 冷卻期：縮短 `cooldown_steps`或檢查相對步數計算
+- **L-BFGS 過於頻繁**: 提高 `min_improve_pct_per_stage`、增大 `cooldown_steps`，或返回複雜梯度檢查(`use_simple_grad_check: false`)
+- **L-BFGS 段內發散/NaN**: 降低 `max_iter`→20、放寬 `tolerance_grad`→1e-5、縮短 `timeout_seconds`；確保段內 FP32。仍不穩時可暫關 line search 或先做數千步 Adam。
+- **段後學習率異常**: 段後自動重建 scheduler；若曲線仍平坦，檢查日誌中的重建訊息與 `Training/LearningRate` 曲線。
+
+### 其他常見問題
+- **人工黏滯常貼上限**: 降低 `last_layer_scale_evm`（如 0.05）或 `alpha_evm`；避免一味增大 β 以免偏黏。
+- **tanh 飽和/梯度尖峰**: 降低 `first_layer_scale_main`→2.0 並確保 (x,y)∈[-1,1]；觀察 `NetworkHealth/Saturation_*`。
+- **PDE loss 長期停滯**: 提高 `last_layer_scale_main`→0.6–0.7；或早期短暫提高學習率/延長暖身。
+- **DDP 權重不一致**: 確認首/末層縮放在 DDP 包裹前完成（本專案已於建構時處理）；自定流程務必維持此順序。
+- **AMP 數值問題**: L-BFGS 段全程 FP32；cap 使用 `torch.full_like(nu_e, float(β)/float(Re))` 以對齊 dtype/裝置。
 
 ### 💡 完整批次訓練
 - **無批次分割**: 每個epoch使用全部120,000個訓練點
