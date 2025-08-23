@@ -22,7 +22,7 @@ training:
   sort_by_boundary_distance: false   # 已在loss引入距離權重，預設關閉排序以節省前處理
   pde_distance_weighting: true       # 啟用PDE距離權重 w(d)
   pde_distance_w_min: 0.2            # 權重下限，避免遠區為0
-  pde_distance_tau: 0.1              # 距離尺度 (越小越聚焦邊界)
+  pde_distance_tau: 0.2              # 距離尺度 (越小越聚焦邊界)
   training_stages:
     - [0.05, 225000, 1e-3, SGDR]            # Stage 1
     - [0.01, 225000, 2e-4, SGDR]                # Stage 2

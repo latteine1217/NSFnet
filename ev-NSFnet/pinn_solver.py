@@ -1874,13 +1874,8 @@ class PysicsInformedNeuralNetwork:
             for group in self.opt.param_groups:
                 group['initial_lr'] = current_lr
             
-            # 關鍵修復：不重建scheduler，只是重新綁定到新optimizer
-            # 保持學習率連續性
-            if self.current_scheduler is not None and hasattr(self.current_scheduler, 'optimizer'):
-                self.current_scheduler.optimizer = self.opt
-                # 手動設置學習率確保一致性
-                for group in self.opt.param_groups:
-                    group['lr'] = current_lr
+            # 穩健重建：凍結後重建scheduler以綁定新optimizer並保持進度/學習率連續
+            self._rebuild_scheduler()
             
             if self.rank == 0:
                 print(f"  Optimizer重建，保持lr={current_lr:.6f}，參數數量: {len(active_params)}")
@@ -1921,13 +1916,8 @@ class PysicsInformedNeuralNetwork:
             for group in self.opt.param_groups:
                 group['initial_lr'] = current_lr
             
-            # 關鍵修復：不重建scheduler，只是重新綁定到新optimizer
-            # 保持學習率連續性
-            if self.current_scheduler is not None and hasattr(self.current_scheduler, 'optimizer'):
-                self.current_scheduler.optimizer = self.opt
-                # 手動設置學習率確保一致性
-                for group in self.opt.param_groups:
-                    group['lr'] = current_lr
+            # 穩健重建：解凍後重建scheduler以綁定新optimizer並保持進度/學習率連續
+            self._rebuild_scheduler()
             
             if self.rank == 0:
                 print(f"  Optimizer重建，保持lr={current_lr:.6f}，參數數量: {len(all_params)}")
