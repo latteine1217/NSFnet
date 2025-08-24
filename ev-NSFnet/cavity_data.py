@@ -17,8 +17,7 @@
 import os
 import numpy as np
 import scipy.io
-from tools import *
-#from scipy.stats import qmc
+from tools import normalize_coordinates, LHSample, sort_pts
 
 
 class DataLoader:
@@ -104,8 +103,7 @@ class DataLoader:
         p = data['P_ref']
         
         # 座標變換: [0,1] → [-1,1]
-        x = 2 * x - 1
-        y = 2 * y - 1
+        x, y = normalize_coordinates(x, y, from_range=(0, 1), to_range=(-1, 1))
         
         x_star = x.reshape(-1,1)
         y_star = y.reshape(-1,1)
@@ -143,8 +141,7 @@ class DataLoader:
         p = data['P_ref']
         
         # 座標變換: [0,1] → [-1,1]
-        x = 2 * x - 1
-        y = 2 * y - 1
+        x, y = normalize_coordinates(x, y, from_range=(0, 1), to_range=(-1, 1))
         
         # 展平数据
         x_flat = x.reshape(-1)

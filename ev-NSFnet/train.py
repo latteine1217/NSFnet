@@ -8,6 +8,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import pinn_solver as psolver
 import cavity_data as cavity
 from config import ConfigManager
+from tools import setup_device, get_cuda_info
 import argparse
 
 torch.backends.cudnn.benchmark = True
@@ -88,9 +89,8 @@ def setup_distributed():
                 print(f"   - Backend: NCCL")
                 print(f"   - 每個進程負責 GPU {local_rank}")
             
-            # 設定CUDA設備
-            if torch.cuda.is_available():
-                torch.cuda.set_device(local_rank)
+            # 使用統一設備管理函數
+            device = setup_device(local_rank)
                 
         return True  # 分布式模式
         

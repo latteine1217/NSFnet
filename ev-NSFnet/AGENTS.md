@@ -11,6 +11,12 @@
 - 平時回覆以及註解撰寫：中文
 - 作圖標題、label：英文
 
+## tools使用規則
+- 當需要搜尋文件內容時，在shell中使用"ripgrep" (https://github.com/BurntSushi/ripgrep)指令取代grep指令
+- 當我使用"@"指名文件時，使用read工具閱讀
+- 當需要搜尋文件位置＆名字時，在shell中使用"fd" (https://github.com/sharkdp/fd)指令取代find指令
+- 當需要查看專案檔案結構時，在shell中使用"tree"指令
+
 ## 硬體環境規則
 本專案使用Dell R740伺服器運行（Intel Xeon Gold 5118 12 Core*2/ 48 threads, 112GB memory, Nvidia P100 16GB *2）。請根據此硬體配置來審查以及設計錯誤解決方式。不要使用本地python做執行測試，需要測試的檔案請寫好後讓我自己手動運行。
 

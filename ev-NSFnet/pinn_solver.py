@@ -18,6 +18,7 @@ import scipy.io
 import numpy as np
 import math
 from net import FCNet
+from tools import setup_device, get_cuda_info
 from typing import Dict, List, Set, Optional, Union, Callable, Any, Tuple
 import warnings
 import time
@@ -120,18 +121,8 @@ class PysicsInformedNeuralNetwork:
             rank=self.rank
         )
 
-        # Set device for current process
-        if torch.cuda.is_available():
-            self.device = torch.device(f'cuda:{self.local_rank}')
-            try:
-                torch.cuda.set_device(self.local_rank)
-            except (RuntimeError, AttributeError):
-                # 處理CUDA設備設置失敗的情況
-                self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-                self.logger.warning(f"Failed to set CUDA device {self.local_rank}, using {self.device}")
-        else:
-            self.device = torch.device('cpu')
-            self.logger.warning("CUDA not available, using CPU")
+        # 使用統一設備管理函數
+        self.device = setup_device(self.local_rank, self.logger)
 
         self.evm = None
         self.Re = Re
@@ -1451,7 +1442,7 @@ class PysicsInformedNeuralNetwork:
                     self.current_scheduler_params.update({
                         'sequential': True,
                         'children': children,
-                        'milestones': list(getattr(scheduler, 'milestones', []))
+                        'milestones': list(getattr(scheduler, 'milestones', [])) or []
                     })
             except Exception:
                 pass
@@ -2040,7 +2031,26 @@ class PysicsInformedNeuralNetwork:
                     else:
                         # 不認識的子scheduler，回退為恆定
                         rebuilt.append(_torch.optim.lr_scheduler.ConstantLR(self.opt, factor=1.0, total_iters=1))
-                ms = self.current_scheduler_params.get('milestones', [0])
+                # 修正milestones邏輯：確保符合PyTorch SequentialLR要求
+                ms = self.current_scheduler_params.get('milestones', [])
+                if len(ms) == 0 and len(rebuilt) >= 2:
+                    # SGDR組合：warmup + main scheduler，需要正確的milestone
+                    if hasattr(rebuilt[0], 'total_iters'):
+                        ms = [rebuilt[0].total_iters]
+                    else:
+                        # 回退預設值：假設warmup佔前10%
+                        total_epochs = getattr(self, 'epochs_per_stage', 300000)
+                        ms = [int(0.1 * total_epochs)]
+                elif len(ms) == 0:
+                    # 單scheduler情況，不需要milestone
+                    ms = []
+                
+                # 驗證milestones數量：len(schedulers) = len(milestones) + 1
+                if len(rebuilt) != len(ms) + 1:
+                    if self.rank == 0:
+                        print(f"  ⚠️ Milestone調整: schedulers={len(rebuilt)}, milestones={len(ms)} -> {len(rebuilt)-1}")
+                    ms = ms[:len(rebuilt)-1] if len(ms) >= len(rebuilt) else ms + [1000] * (len(rebuilt) - len(ms) - 1)
+                
                 self.current_scheduler = _torch.optim.lr_scheduler.SequentialLR(
                     self.opt,
                     schedulers=rebuilt,
