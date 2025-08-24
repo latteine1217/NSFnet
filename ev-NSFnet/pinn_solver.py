@@ -983,12 +983,21 @@ class PysicsInformedNeuralNetwork:
               profiler=None,
               start_epoch=0):
         if self.opt is not None:
-            # 如果有scheduler，特別是SequentialLR（SGDR），不覆蓋其設置的學習率
+            # 對於SGDR (SequentialLR)，需要特殊處理以確保新階段的學習率正確設置
             if scheduler is not None and hasattr(scheduler, '_schedulers'):
-                # SequentialLR情況：讓scheduler控制學習率
+                # SequentialLR情況：需要更新基礎學習率但保持scheduler狀態
+                current_lr = self.opt.param_groups[0]['lr']
+                
+                # 更新基礎學習率和initial_lr，確保scheduler從正確的基礎開始
+                for param_group in self.opt.param_groups:
+                    param_group['initial_lr'] = lr
+                
+                # 重置scheduler狀態以使用新的基礎學習率
+                scheduler.last_epoch = -1
+                
                 if self.rank == 0:
-                    current_lr = self.opt.param_groups[0]['lr']
-                    print(f"🔧 檢測到SequentialLR scheduler，保持當前lr: {current_lr:.6f}，不覆蓋為: {lr:.6f}")
+                    print(f"🔧 檢測到SequentialLR scheduler (SGDR)，更新基礎lr: {current_lr:.6f} -> {lr:.6f}")
+                    print(f"   重置scheduler以從新基礎學習率開始")
             else:
                 # 無scheduler或非SequentialLR：正常設置學習率
                 self.opt.param_groups[0]['lr'] = lr

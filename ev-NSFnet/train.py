@@ -334,9 +334,10 @@ def main():
             PINN.current_stage = stage_name
             PINN.set_alpha_evm(alpha_evm)
             
-            # 設置優化器的學習率，這是每個階段的基礎學習率
+            # 設置優化器的學習率和initial_lr，這是每個階段的基礎學習率
             for param_group in PINN.opt.param_groups:
                 param_group['lr'] = learning_rate
+                param_group['initial_lr'] = learning_rate  # 確保scheduler能正確使用基礎學習率
 
             # 根據策略決定調度器（由配置指定）
             stage_scheduler = None
@@ -379,8 +380,11 @@ def main():
                 eta_min = float(getattr(sgdr_cfg, 'eta_min', eta_min) if sgdr_cfg else eta_min)
                 start_factor = float(getattr(sgdr_cfg, 'start_factor', 0.1) if sgdr_cfg else 0.1)
                 end_factor = float(getattr(sgdr_cfg, 'end_factor', 1.0) if sgdr_cfg else 1.0)
+                
                 if not is_distributed or PINN.rank == 0:
                     print(f"   - 啟用 SGDR: warmup={warmup_epochs}, T_0={T_0}, T_mult={T_mult}, eta_min={eta_min:.2e}")
+                    print(f"     * 基礎學習率: {learning_rate:.2e} (warmup: {start_factor} -> {end_factor})")
+                
                 # 建立 SequentialLR: LinearLR (warmup) -> CosineAnnealingWarmRestarts
                 warmup_sched = torch.optim.lr_scheduler.LinearLR(
                     PINN.opt,
