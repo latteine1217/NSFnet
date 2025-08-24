@@ -1632,7 +1632,8 @@ class PysicsInformedNeuralNetwork:
             
             # Scheduler步進 - 必須在optimizer.step()之後
             # 優先使用傳入的scheduler，避免freeze/unfreeze後的scheduler失效問題
-            active_scheduler = scheduler if scheduler is not None else self.current_scheduler
+            # 使用當前重建後的scheduler優先，避免freeze/unfreeze後仍引用舊scheduler
+            active_scheduler = self.current_scheduler if self.current_scheduler is not None else scheduler
             if active_scheduler:
                 old_lr = self.opt.param_groups[0]['lr']
                 active_scheduler.step()
@@ -1870,9 +1871,10 @@ class PysicsInformedNeuralNetwork:
             self.opt = optimizer_class(active_params, lr=current_lr)
             self.opt.state.clear()
             
-            # 确保有initial_lr参数
+            # 確保有initial_lr參數（僅在缺失時補上，避免覆寫stage基準lr）
             for group in self.opt.param_groups:
-                group['initial_lr'] = current_lr
+                if 'initial_lr' not in group:
+                    group['initial_lr'] = current_lr
             
             # 穩健重建：凍結後重建scheduler以綁定新optimizer並保持進度/學習率連續
             self._rebuild_scheduler()
@@ -1912,9 +1914,10 @@ class PysicsInformedNeuralNetwork:
             self.opt = optimizer_class(all_params, lr=current_lr)
             self.opt.state.clear()
             
-            # 确保有initial_lr参数
+            # 確保有initial_lr參數（僅在缺失時補上，避免覆寫stage基準lr）
             for group in self.opt.param_groups:
-                group['initial_lr'] = current_lr
+                if 'initial_lr' not in group:
+                    group['initial_lr'] = current_lr
             
             # 穩健重建：解凍後重建scheduler以綁定新optimizer並保持進度/學習率連續
             self._rebuild_scheduler()
