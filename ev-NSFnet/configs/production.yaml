@@ -10,7 +10,7 @@ network:
   first_layer_scale_main: 1.5
   last_layer_scale_main: 0.6
   first_layer_scale_evm: 1.5
-  last_layer_scale_evm: 0.05
+  last_layer_scale_evm: 0.02
   evm_output_activation: abs_cap
 
 training:
@@ -29,6 +29,7 @@ training:
     - [0.005, 200000, 4e-5, Constant]           # Stage 3
     - [0.002, 200000, 1e-5, Constant]           # Stage 4
     - [0.001, 300000, 2e-6, Constant]           # Stage 5
+
   # SGDR scheduler parameters (optional)
   sgdr:
     warmup_epochs: 1000     # 緩啟動步數（每stage計數）
