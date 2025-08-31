@@ -11,7 +11,7 @@ network:
   last_layer_scale_main: 0.6
   first_layer_scale_evm: 1.5
   last_layer_scale_evm: 0.01
-  evm_output_activation: softplus_cap
+  evm_output_activation: abs_cap
 
 training:
   N_f: 120000
