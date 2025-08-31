@@ -467,7 +467,7 @@ class PysicsInformedNeuralNetwork:
                 for name, module in self.get_model(self.net).named_modules():
                     if isinstance(module, torch.nn.Linear):
                         pre_activation = torch.matmul(test_input, module.weight.T) + module.bias
-                        saturation_ratio = (pre_activation.abs() > 3.0).float().mean().item()
+                        saturation_ratio = (pre_activation.abs() > 2.0).float().mean().item()
                         saturation_info.append((f"主網絡_Layer{layer_count}", saturation_ratio))
                         test_input = torch.tanh(pre_activation)
                         layer_count += 1
@@ -479,7 +479,7 @@ class PysicsInformedNeuralNetwork:
                 for name, module in self.get_model(self.net_1).named_modules():
                     if isinstance(module, torch.nn.Linear):
                         pre_activation = torch.matmul(test_input_evm, module.weight.T) + module.bias
-                        saturation_ratio = (pre_activation.abs() > 3.0).float().mean().item()
+                        saturation_ratio = (pre_activation.abs() > 2.0).float().mean().item()
                         saturation_info.append((f"EVM網絡_Layer{layer_count}", saturation_ratio))
                         test_input_evm = torch.tanh(pre_activation)
                         layer_count += 1
@@ -1769,7 +1769,7 @@ class PysicsInformedNeuralNetwork:
                     should_monitor = True
                 elif epoch_id in [300000, 600000, 900000, 1200000, 1500000]:  # 階段轉換點
                     should_monitor = True
-                elif epoch_id > 1000 and epoch_id % 50000 == 0:  # 定期檢查
+                elif epoch_id > 1000 and epoch_id % 10000 == 0:  # 定期檢查
                     should_monitor = True
                 
                 # 確定是否需要精確計時
