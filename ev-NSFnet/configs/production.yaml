@@ -10,7 +10,7 @@ network:
   first_layer_scale_main: 1.5
   last_layer_scale_main: 0.6
   first_layer_scale_evm: 1.5
-  last_layer_scale_evm: 0.02
+  last_layer_scale_evm: 0.1
   evm_output_activation: abs_cap
 
 training:
@@ -48,7 +48,7 @@ training:
     
     # 放寬的觸發條件：分階段視窗+改善率
     trigger_window_per_stage: [5000, 7500, 10000]
-    min_improve_pct_per_stage: [0.02, 0.03, 0.015]  # Stage 3-4放寬到3%，Stage 5-6放寬到1.5%
+    min_improve_pct_per_stage: [0.02, 0.015, 0.01]  
     ema_gamma: 0.95
     
     # 簡化的梯度條件
@@ -76,7 +76,7 @@ training:
     checkpoint_before_lbfgs: true     # L-BFGS前自動保存
 
 physics:
-  Re: 5000
+  Re: 3000
   alpha_evm: 0.05
   beta: 5.0
   bc_weight: 10.0
@@ -85,7 +85,7 @@ physics:
 supervision:
   enabled: true
   data_points: 1  # 数据监督点数量，0表示不使用监督数据
-  data_path: "data/cavity_Re5000_256_Uniform.mat"
+  data_path: "data/cavity_Re3000_256_Uniform.mat"
   weight: 5.0     # 监督数据权重
   random_seed: 42 # 确保可重现性
 
