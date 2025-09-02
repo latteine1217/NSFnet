@@ -101,6 +101,62 @@ training:
 
 ## 🔧 分佈式訓練 & L-BFGS 自適應優化
 
+### 🧩 Per-Stage AdamW & Weight Decay 策略
+
+引入 **分階段 AdamW + 解耦 weight decay**，搭配多階段 α_EVM / lr 設計，使早期具備較強平滑與正則，中後期逐步降低衰減，最後階段關閉，以保留細節。
+
+**為何不用傳統 L2？**  
+AdamW 透過 decoupled decay 對參數施加 `w ← w - lr * wd * w`，不干擾一階動量估計，較傳統 L2 (coupled) 在 PINN 長程收斂更穩定。
+
+**參數分組規則**：
+- 施加 decay：`p.dim() > 1` 且 參數名稱不以 `bias` 結尾（權重矩陣、卷積核）
+- 不施加 decay：偏置項、一維標量（例如 LayerNorm 等，若未來擴充）
+
+**配置範例 (production.yaml)**：
+```yaml
+training:
+  training_stages:
+    - [0.05, 200000, 1e-3, Constant]
+    - [0.01, 200000, 2e-4, Constant]
+    - [0.005, 200000, 4e-5, Constant]
+    - [0.002, 200000, 1e-5, Constant]
+    - [0.001, 300000, 2e-6, Constant]
+  weight_decay_stages: [1.0e-5, 5.0e-6, 5.0e-6, 2.0e-6, 0.0]
+```
+> 長度需與 `training_stages` 對齊，不一致會自動裁剪 / 補齊（尾值填充）。
+
+**建議調參邏輯**：
+| 目標 | 建議行為 |
+|------|----------|
+| 早期梯度震盪 | 加大 Stage1 wd (至 2e-5) |
+| 中期收斂偏慢 | 降低中期 wd → 1e-6，保留 lr scheduler |
+| 最終細節模糊 | 最後一階段設 0.0 關閉 wd |
+| 發散或梯度爆炸 | 提升對應階段 wd 1.5~2 倍 |
+
+**與 Dummy L2 的互斥機制**：
+- 分佈式下若偵測任何參數組已有 `weight_decay>0`，則停用 dummy L2（避免重複正則）
+- 僅當所有 wd=0 時啟用極小 `1e-8` 級別 dummy 項，防止 DDP bucket 內完全無梯度觸發警告
+
+**Stage 重建與動量**：
+- 每次進入新 Stage 會重建 AdamW（動量歸零），屬刻意設計：避免舊動量跨尺度 (lr, α_EVM) 污染
+- 若需跨 Stage 保留動量，可後續擴充：保存 `state_dict` + 動態更新 param_groups
+
+**L-BFGS 段後恢復**：
+- L-BFGS 結束即刻以當前 lr / wd 重建 AdamW，確保 weight decay 序列不中斷
+
+**TensorBoard 指標**：
+- `Training/WeightDecay`：當前 Stage 使用的 wd 值
+- 可對比 `Training/LearningRate` 觀察 (lr, wd) 雙調度對收斂曲線影響
+
+**常見策略模板**：
+| 模式 | wd 序列 | 特性 |
+|------|---------|------|
+| 穩健 baseline | [1e-5,5e-6,5e-6,2e-6,0.0] | 兼顧穩定與後期細節 |
+| 快速探索 | [5e-6,2e-6,1e-6,5e-7,0.0] | 較少正則，適合架構/α_EVM 測試 |
+| 高穩定需求 | [2e-5,1e-5,5e-6,2e-6,1e-6] | 降低早期梯度噪聲，稍慢 |
+
+---
+
 ### 🚀 分佈式訓練 (SLURM + torchrun)
 
 ```bash

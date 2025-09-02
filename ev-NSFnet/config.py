@@ -74,6 +74,10 @@ class TrainingConfig:
     pde_distance_weighting: bool = True     # 是否啟用PDE距離權重 w(d)
     pde_distance_w_min: float = 0.2         # 權重下限，避免遠區權重為0
     pde_distance_tau: float = 0.1           # 指數權重尺度參數 tau
+
+    # AdamW 權重衰減
+    weight_decay: float = 0.0                 # 全域 weight decay（若無分階段列表則使用）
+    weight_decay_stages: Optional[List[float]] = None  # 分階段 weight decay（需與 training_stages 長度一致）
     
     # 訓練階段配置 (alpha_evm, epochs, learning_rate[, scheduler])
     training_stages: Optional[List[Tuple]] = None
@@ -95,6 +99,20 @@ class TrainingConfig:
                 (0.002, 350000, 2e-6),   # Stage 5
                 (0.002, 350000, 2e-6)   # Stage 6
             ]
+        # 分階段 weight decay 長度驗證
+        if self.weight_decay_stages is not None:
+            if len(self.weight_decay_stages) != len(self.training_stages):
+                # 自動調整：長度過長則裁剪，過短則以最後一個值填充
+                orig = list(self.weight_decay_stages)
+                if len(self.weight_decay_stages) > len(self.training_stages):
+                    self.weight_decay_stages = self.weight_decay_stages[:len(self.training_stages)]
+                else:
+                    if len(self.weight_decay_stages) > 0:
+                        last = self.weight_decay_stages[-1]
+                    else:
+                        last = 0.0
+                    self.weight_decay_stages = self.weight_decay_stages + [last] * (len(self.training_stages) - len(self.weight_decay_stages))
+                print(f"[Config] ⚠️ weight_decay_stages 長度自動調整: 原={orig} -> 新={self.weight_decay_stages}")
         if self.lbfgs is None:
             self.lbfgs = LBFGSConfig()
         # 預設觸發視窗與門檻（若未設定）
@@ -305,13 +323,22 @@ class ConfigManager:
         print(f"   依距離排序: {'是' if self.config.training.sort_by_boundary_distance else '否'}")
         print(f"   PDE距離權重: {'啟用' if self.config.training.pde_distance_weighting else '關閉'} (w_min={self.config.training.pde_distance_w_min}, tau={self.config.training.pde_distance_tau})")
         print(f"   總階段數: {len(self.config.training.training_stages)}")
+        # 顯示 weight decay 策略
+        if self.config.training.weight_decay_stages is not None:
+            print(f"   Weight Decay(分階段): {self.config.training.weight_decay_stages}")
+        else:
+            print(f"   Weight Decay(全域): {self.config.training.weight_decay}")
         for i, st in enumerate(self.config.training.training_stages):
             try:
                 a,e,l,s = st
             except Exception:
                 a,e,l = st[:3]
                 s = 'Constant'
-            print(f"   - Stage {i+1}: alpha={a}, epochs={e}, lr={l}, sched={s}")
+            if self.config.training.weight_decay_stages is not None:
+                wd_val = self.config.training.weight_decay_stages[i]
+            else:
+                wd_val = self.config.training.weight_decay
+            print(f"   - Stage {i+1}: alpha={a}, epochs={e}, lr={l}, wd={wd_val}, sched={s}")
         
         print(f"⚡ 物理參數:")
         print(f"   Reynolds數: {self.config.physics.Re}")

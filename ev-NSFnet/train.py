@@ -291,20 +291,21 @@ def main():
             print(f"   預估完成時間將在訓練開始後計算...")
             print("=" * 60)
 
-        # 創建optimizer
-        optimizer = torch.optim.Adam(
-            list(PINN.get_model_parameters(PINN.net)) + list(PINN.get_model_parameters(PINN.net_1)),
-            lr=training_stages[0][2],
-            weight_decay=0.0
-        )
-        PINN.set_optimizers(optimizer)
+        # 初始化 AdamW（Stage 0 placeholder，實際每Stage重建）
+        PINN.build_adamw_optimizer = getattr(PINN, 'build_adamw_optimizer')  # 保險引用
+        first_lr = training_stages[0][2]
+        if getattr(config.training, 'weight_decay_stages', None) is not None:
+            first_wd = config.training.weight_decay_stages[0]
+        else:
+            first_wd = getattr(config.training, 'weight_decay', 0.0)
+        PINN.build_adamw_optimizer(first_lr, first_wd)
 
         # 恢復訓練狀態
         start_epoch = 0
         if args.resume:
             if rank == 0:
                 print(f"🔄 正在從檢查點恢復: {args.resume}")
-            start_epoch = PINN.load_checkpoint(args.resume, optimizer)
+            start_epoch = PINN.load_checkpoint(args.resume, PINN.opt)
             if rank == 0:
                 if start_epoch > 0:
                     print(f"✅ 成功恢復，將從 epoch {start_epoch} 開始")
@@ -334,10 +335,14 @@ def main():
             PINN.current_stage = stage_name
             PINN.set_alpha_evm(alpha_evm)
             
-            # 設置優化器的學習率和initial_lr，這是每個階段的基礎學習率
-            for param_group in PINN.opt.param_groups:
-                param_group['lr'] = learning_rate
-                param_group['initial_lr'] = learning_rate  # 確保scheduler能正確使用基礎學習率
+            # 重建 AdamW 以套用該階段學習率與 weight decay
+            if getattr(config.training, 'weight_decay_stages', None) is not None:
+                stage_wd = config.training.weight_decay_stages[stage_idx]
+            else:
+                stage_wd = getattr(config.training, 'weight_decay', 0.0)
+            PINN.build_adamw_optimizer(learning_rate, stage_wd)
+            if rank == 0:
+                print(f"   - Optimizer: AdamW (lr={learning_rate:.2e}, wd={stage_wd})")
 
             # 根據策略決定調度器（由配置指定）
             stage_scheduler = None

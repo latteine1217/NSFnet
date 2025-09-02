@@ -437,6 +437,52 @@ class PysicsInformedNeuralNetwork:
     def set_optimizers(self, opt):
         self.opt = opt
 
+    # ================= AdamW / Weight Decay 支援 =================
+    def _build_param_groups(self, weight_decay: float) -> list:
+        """建立 AdamW 參數分組：可訓練參數中，維度>1且非 bias 施加 decay。"""
+        params_decay = []
+        params_nodecay = []
+        for model in [self.get_model(self.net), self.get_model(self.net_1)]:
+            for name, p in model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                if p.dim() > 1 and not name.endswith('bias'):
+                    params_decay.append(p)
+                else:
+                    params_nodecay.append(p)
+        groups = []
+        if params_decay:
+            groups.append({'params': params_decay, 'weight_decay': weight_decay})
+        if params_nodecay:
+            groups.append({'params': params_nodecay, 'weight_decay': 0.0})
+        return groups
+
+    def build_adamw_optimizer(self, lr: float, weight_decay: float):
+        """建立新的 AdamW 並更新 self.opt，同時保留 scheduler 連續性資訊。"""
+        from torch.optim import AdamW
+        groups = self._build_param_groups(weight_decay)
+        self.opt = AdamW(groups, lr=lr, betas=(0.9, 0.999))
+        for pg in self.opt.param_groups:
+            pg['initial_lr'] = lr
+        self.current_weight_decay = weight_decay
+        # 重建 scheduler 以綁定新 optimizer（若已有記錄）
+        try:
+            self._rebuild_scheduler()
+        except Exception:
+            pass
+        if self.rank == 0:
+            print(f"🔧 構建 AdamW: lr={lr:.2e}, wd={weight_decay}, groups={len(self.opt.param_groups)}")
+        return self.opt
+
+    def rebuild_after_structure_change(self):
+        """在 freeze/unfreeze 或 L-BFGS 後重建 AdamW（保持 lr / wd）。"""
+        if not hasattr(self, 'current_weight_decay'):
+            self.current_weight_decay = 0.0
+        lr = 1e-3
+        if self.opt is not None and self.opt.param_groups:
+            lr = self.opt.param_groups[0].get('lr', lr)
+        self.build_adamw_optimizer(lr, self.current_weight_decay)
+
     def set_alpha_evm(self, alpha):
         self.alpha_evm = alpha
 
@@ -925,23 +971,30 @@ class PysicsInformedNeuralNetwork:
 
         # 計算總損失（保持梯度追踪），包含监督损失
         self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e + self.alpha_s * self.loss_s
-
-        # 添加一個小的正則化項確保兩個網路都參與梯度計算
-        # 這不會影響訓練結果，但確保DDP工作正常
+        
+        # 分佈式模式下的 dummy L2：當無實際 weight decay 時才啟用，避免與 AdamW 重複
         if self.world_size > 1:
-            regularization_weight = 1e-8
-            if hasattr(self.net, 'module'):
-                params_main = self.net.module.parameters()
-                params_evm = self.net_1.module.parameters()
+            use_dummy = True
+            if hasattr(self, 'current_weight_decay') and getattr(self, 'current_weight_decay', 0.0) > 0:
+                use_dummy = False
             else:
-                params_main = self.net.parameters()
-                params_evm = self.net_1.parameters()
+                if self.opt is not None:
+                    for pg in self.opt.param_groups:
+                        if pg.get('weight_decay', 0.0) > 0:
+                            use_dummy = False
+                            break
+            if use_dummy:
+                regularization_weight = 1e-8
+                if hasattr(self.net, 'module'):
+                    params_main = self.net.module.parameters()
+                    params_evm = self.net_1.module.parameters()
+                else:
+                    params_main = self.net.parameters()
+                    params_evm = self.net_1.parameters()
+                net_reg = sum(p.pow(2).sum() for p in params_main)
+                net1_reg = sum(p.pow(2).sum() for p in params_evm)
+                self.loss = self.loss + regularization_weight * (net_reg + net1_reg)
 
-            # 使用生成器避免建立中間list與stack，減少記憶體與運算開銷
-            net_reg = sum(p.pow(2).sum() for p in params_main)
-            net1_reg = sum(p.pow(2).sum() for p in params_evm)
-
-            self.loss = self.loss + regularization_weight * (net_reg + net1_reg)
 
         # 創建用於backward的loss（保持梯度）
         loss_for_backward = self.loss
@@ -1344,14 +1397,16 @@ class PysicsInformedNeuralNetwork:
                 print(f"🚨 L-BFGS執行失敗: {e}")
             success = False
         
-        # 恢復Adam優化器
+        # 恢復AdamW優化器（保持 stage lr / weight decay）
         current_lr = self.opt.param_groups[0]['lr'] if self.opt is not None else 1e-4
-        self.opt = torch.optim.Adam(list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters()), 
-                                   lr=current_lr, weight_decay=0.0)
-        
-        # 确保有initial_lr参数
-        for group in self.opt.param_groups:
-            group['initial_lr'] = current_lr
+        wd = getattr(self, 'current_weight_decay', 0.0)
+        try:
+            self.build_adamw_optimizer(current_lr, wd)
+        except Exception:
+            # 回退普通Adam
+            self.opt = torch.optim.Adam(list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters()), lr=current_lr)
+            for group in self.opt.param_groups:
+                group['initial_lr'] = current_lr
         
         # 段後解鎖/解凍並重建scheduler以绑定新的optimizer
         self.lock_vis_t_minus = False
@@ -1797,6 +1852,18 @@ class PysicsInformedNeuralNetwork:
                     self.safe_tensorboard_log('Loss/Equation_Continuity', epoch_losses[5], global_step)
                     self.safe_tensorboard_log('Loss/Equation_EntropyResidual', epoch_losses[6], global_step)
                     self.safe_tensorboard_log('Training/LearningRate', self.opt.param_groups[0]['lr'], global_step)
+                    # 記錄當前 weight decay（主參數組）
+                    try:
+                        wd_val = float(getattr(self, 'current_weight_decay', 0.0))
+                        if wd_val <= 0.0:
+                            # 若 current_weight_decay 未設或為0，嘗試從參數組檢測
+                            for _pg in self.opt.param_groups:
+                                if _pg.get('weight_decay', 0.0) > 0:
+                                    wd_val = float(_pg['weight_decay'])
+                                    break
+                        self.safe_tensorboard_log('Training/WeightDecay', wd_val, global_step)
+                    except Exception:
+                        pass
                     self.safe_tensorboard_log('Training/EpochTime', epoch_time, global_step)
                     self.safe_tensorboard_log('Training/Alpha_EVM', self.alpha_evm, global_step)
                     
@@ -1845,38 +1912,14 @@ class PysicsInformedNeuralNetwork:
         # 凍結net_1的所有參數
         for param in self.net_1.parameters():
             param.requires_grad = False
-    
-        # 更新optimizer的參數組 - 僅包含需要梯度的參數
-        active_params = []
-        for param in self.net.parameters():
-            if param.requires_grad:
-                active_params.append(param)
-        
-        # 保存當前學習率和scheduler狀態
-        current_lr = self.opt.param_groups[0]['lr'] if self.opt else 1e-3
-        
-        # 重新初始化優化器以確保參數組同步
-        if len(active_params) > 0:
-            optimizer_class = type(self.opt)
-            self.opt = optimizer_class(active_params, lr=current_lr)
-            self.opt.state.clear()
-            
-            # 確保有initial_lr參數（僅在缺失時補上，避免覆寫stage基準lr）
-            for group in self.opt.param_groups:
-                if 'initial_lr' not in group:
-                    group['initial_lr'] = current_lr
-            
-            # 穩健重建：凍結後重建scheduler以綁定新optimizer並保持進度/學習率連續
-            self._rebuild_scheduler()
-            
-            if self.rank == 0:
-                print(f"  Optimizer重建，保持lr={current_lr:.6f}，參數數量: {len(active_params)}")
-        else:
-            if self.rank == 0:
-                print("  No active parameters found for main network, optimizer not reinitialized.")
-        
-        if self.rank == 0:
-            print(f"  Active parameters: {len(active_params)} (net only)")
+        # 重建 AdamW 以移除凍結參數
+        try:
+            self.rebuild_after_structure_change()
+        except Exception:
+            pass
+        if self.rank == 0 and self.opt is not None:
+            total_trainable = sum(p.numel() for g in self.opt.param_groups for p in g['params'])
+            print(f"  Active parameters (net only): {total_trainable}")
 
     def defreeze_evm_net(self, epoch_id):
         """

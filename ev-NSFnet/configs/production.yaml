@@ -29,6 +29,8 @@ training:
     - [0.005, 200000, 4e-5, Constant]           # Stage 3
     - [0.002, 200000, 1e-5, Constant]           # Stage 4
     - [0.001, 300000, 2e-6, Constant]           # Stage 5
+  # Per-Stage AdamW weight decay (length must equal stages)
+  weight_decay_stages: [1.0e-5, 5.0e-6, 5.0e-6, 2.0e-6, 0.0]
 
   # SGDR scheduler parameters (optional)
   sgdr:
