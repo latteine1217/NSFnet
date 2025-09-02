@@ -41,7 +41,7 @@ training:
 
   # L-BFGS相關配置
   lbfgs:
-    enabled_in_distributed: true      # 啟用分佈式L-BFGS
+    enabled_in_distributed: false      # 啟用分佈式L-BFGS
     
     # 階段控制：從Stage 3開始才啟用L-BFGS
     enable_from_stage: 3

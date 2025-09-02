@@ -455,15 +455,16 @@ class PysicsInformedNeuralNetwork:
         return 0.0
 
     def check_tanh_saturation(self, epoch_id):
-        """檢測tanh激活函數飽和情況"""
-        if epoch_id % 1000 == 0 and self.rank == 0:  # 每1000個epoch檢查一次，僅主進程
+        """檢測tanh激活函數飽和情況（使用全域步數串接所有stage）"""
+        if epoch_id % 1000 == 0 and self.rank == 0:  # 頻率控制仍沿用呼叫端 + 1000步節流
+            # 全域步數（跨 stage 單調遞增）避免TensorBoard覆寫
+            global_step = getattr(self, 'global_step_offset', 0) + epoch_id
             saturation_info = []
             
             # 檢查主網絡
             with torch.no_grad():
                 test_input = torch.cat([self.x_f[:100], self.y_f[:100]], dim=1)
                 layer_count = 0
-                
                 for name, module in self.get_model(self.net).named_modules():
                     if isinstance(module, torch.nn.Linear):
                         pre_activation = torch.matmul(test_input, module.weight.T) + module.bias
@@ -475,7 +476,6 @@ class PysicsInformedNeuralNetwork:
                 # 檢查EVM網絡
                 test_input_evm = torch.cat([self.x_f[:100], self.y_f[:100]], dim=1)
                 layer_count = 0
-                
                 for name, module in self.get_model(self.net_1).named_modules():
                     if isinstance(module, torch.nn.Linear):
                         pre_activation = torch.matmul(test_input_evm, module.weight.T) + module.bias
@@ -489,10 +489,10 @@ class PysicsInformedNeuralNetwork:
             if high_saturation_layers:
                 self.logger.warning(f"⚠️  高飽和層 (>30%): {high_saturation_layers}")
             
-            # 記錄到TensorBoard
+            # 記錄到TensorBoard（使用global_step避免覆寫）
             if self.tb_writer is not None:
                 for name, ratio in saturation_info:
-                    self.safe_tensorboard_log(f"NetworkHealth/Saturation_{name}", ratio, epoch_id)
+                    self.safe_tensorboard_log(f"NetworkHealth/Saturation_{name}", ratio, global_step)
             
             # 梯度分析 (增強診斷)
             grad_norms = []
@@ -502,16 +502,12 @@ class PysicsInformedNeuralNetwork:
                     for param in param_group['params']:
                         if param.grad is not None:
                             grad_norms.append(param.grad.norm().item())
-                
                 if grad_norms:
                     avg_grad_norm = sum(grad_norms) / len(grad_norms)
                     max_grad_norm = max(grad_norms)
-                    
                     if self.tb_writer is not None:
-                        self.safe_tensorboard_log('NetworkHealth/Avg_Grad_Norm', avg_grad_norm, epoch_id)
-                        self.safe_tensorboard_log('NetworkHealth/Max_Grad_Norm', max_grad_norm, epoch_id)
-                    
-                    # 梯度異常警告
+                        self.safe_tensorboard_log('NetworkHealth/Avg_Grad_Norm', avg_grad_norm, global_step)
+                        self.safe_tensorboard_log('NetworkHealth/Max_Grad_Norm', max_grad_norm, global_step)
                     if avg_grad_norm < 1e-6:
                         self.logger.warning(f"🔻 梯度異常小: {avg_grad_norm:.2e} (可能梯度消失)")
                     elif avg_grad_norm > 1e2:
@@ -522,15 +518,11 @@ class PysicsInformedNeuralNetwork:
                 sample_input = torch.cat([self.x_f[:50], self.y_f[:50]], dim=1)
                 main_output = self.net(sample_input)
                 evm_output = self.net_1(sample_input)
-                
                 velocity_max = main_output[:, :2].abs().max().item()
                 evm_max = evm_output.abs().max().item()
-                
                 if self.tb_writer is not None:
-                    self.safe_tensorboard_log('NetworkHealth/Velocity_Output_Max', velocity_max, epoch_id)
-                    self.safe_tensorboard_log('NetworkHealth/EVM_Output_Max', evm_max, epoch_id)
-                
-                # 輸出異常警告
+                    self.safe_tensorboard_log('NetworkHealth/Velocity_Output_Max', velocity_max, global_step)
+                    self.safe_tensorboard_log('NetworkHealth/EVM_Output_Max', evm_max, global_step)
                 if velocity_max > 2.0:
                     self.logger.warning(f"🌊 速度輸出過大: {velocity_max:.3f} (建議<2.0)")
                 if evm_max > 0.1:
@@ -546,16 +538,14 @@ class PysicsInformedNeuralNetwork:
                     health_issues.append("梯度消失")
                 elif avg_grad_norm > 1e2:
                     health_issues.append("梯度爆炸")
-            if velocity_max > 2.0:
+            if 'velocity_max' in locals() and velocity_max > 2.0:
                 health_issues.append("速度輸出過大")
-            if evm_max > 0.1:
+            if 'evm_max' in locals() and evm_max > 0.1:
                 health_issues.append("EVM輸出過大")
-                
             if health_issues:
                 self.logger.warning(f"🏥 網路健康警告: {'; '.join(health_issues)}")
             else:
                 self.logger.info(f"✅ 網路健康狀態良好 (飽和率: {avg_saturation*100:.1f}%)")
-            
             if avg_saturation > 0.2:
                 self.logger.warning(f"🔥 平均飽和率: {avg_saturation*100:.1f}% (建議<20%)")
 
