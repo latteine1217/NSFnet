@@ -93,7 +93,7 @@ class PysicsInformedNeuralNetwork:
                  batch_size = None,
                  alpha_evm=0.03,
                  learning_rate=0.001,
-                 weight_decay=0.9,
+                 # weight_decay 參數已移除：改由 config.training.weight_decay / weight_decay_stages 控制
                  outlet_weight=1,
                  bc_weight=10,
                  eq_weight=1,
@@ -333,7 +333,8 @@ class PysicsInformedNeuralNetwork:
             'Re': self.Re,
             'alpha_evm': self.alpha_evm,
             'current_stage': self.current_stage,
-            'global_step_offset': self.global_step_offset
+            'global_step_offset': self.global_step_offset,
+            'current_weight_decay': getattr(self, 'current_weight_decay', 0.0)
         }
 
         try:
@@ -343,45 +344,138 @@ class PysicsInformedNeuralNetwork:
             self.logger.error(f"Failed to save checkpoint to {checkpoint_path}: {e}")
 
     def load_checkpoint(self, checkpoint_path, optimizer):
-        """Loads a checkpoint to resume training."""
+        """Loads a checkpoint to resume training with optimizer structure auto-repair.
+
+        增強內容:
+        1. 自動檢查 optimizer.param_groups 結構是否符合 AdamW(decay + nodecay) 規範
+        2. 若檢測到 legacy / 不一致結構 → 依照保存的 current_weight_decay 重建
+        3. 嘗試將舊 state 中的 exp_avg / exp_avg_sq / step 遷移至新參數 (以 id 匹配)
+        4. 若遷移失敗不終止，記錄警告並以新狀態繼續
+        """
+        def _needs_rebuild(opt: torch.optim.Optimizer) -> bool:
+            try:
+                if opt is None or not opt.param_groups:
+                    return True
+                # 規範: 1~2 groups; 若 >2 代表舊格式或手動 group
+                if len(opt.param_groups) > 2:
+                    return True
+                # 若只有1組但 weight_decay=0 且存在可 decay 參數 → 允許, 但不強制重建
+                # 驗證 group 欄位完整性
+                for g in opt.param_groups:
+                    if 'params' not in g:
+                        return True
+                return False
+            except Exception:
+                return True
+        def _migrate_state(old_state: dict, new_opt: torch.optim.Optimizer):
+            try:
+                # old_state: optimizer.state (k=id(param))
+                if not old_state:
+                    return 0,0
+                transferred = 0
+                skipped = 0
+                new_param_ids = {id(p): p for pg in new_opt.param_groups for p in pg['params']}
+                for pid, s in old_state.items():
+                    if pid in new_param_ids:
+                        try:
+                            new_state_slot = new_opt.state[new_param_ids[pid]]
+                            for k,v in s.items():
+                                if isinstance(v, torch.Tensor):
+                                    if k in new_state_slot and new_state_slot[k].shape == v.shape:
+                                        new_state_slot[k].copy_(v.to(new_state_slot[k].device))
+                                    else:
+                                        new_state_slot[k] = v.to(new_state_slot.get(k, v).device)
+                                else:
+                                    new_state_slot[k] = v
+                            transferred += 1
+                        except Exception:
+                            skipped += 1
+                    else:
+                        skipped += 1
+                if self.rank == 0 and transferred>0:
+                    print(f"   🔄 Optimizer state migrated: {transferred} tensors (skipped {skipped})")
+            except Exception as e:
+                if self.rank == 0:
+                    print(f"   ⚠️ Optimizer state migration failed: {e}")
         if not os.path.exists(checkpoint_path):
             self.logger.error(f"Checkpoint file not found: {checkpoint_path}")
             return 0 # Return 0 to indicate training should start from epoch 0
 
         try:
-            # Load checkpoint to the same device as the model
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
-
-            # Load model weights
             self.get_model(self.net).load_state_dict(checkpoint['net_state_dict'])
             self.get_model(self.net_1).load_state_dict(checkpoint['net_1_state_dict'])
 
-            # Load optimizer state if available
-            opt_state = checkpoint.get('optimizer_state_dict', None)
-            if opt_state:
-                self._load_optimizer_state_dict_safe(optimizer, opt_state)
+            # 先讀取保存的 wd
+            saved_wd = checkpoint.get('current_weight_decay', 0.0)
+            self.current_weight_decay = saved_wd
 
-            # Load training state
+            # 嘗試載入舊 optimizer state（若結構不符會後續重建）
+            opt_state = checkpoint.get('optimizer_state_dict', None)
+            legacy_state = None
+            if opt_state and optimizer is not None:
+                try:
+                    # 嘗試直接載入 (可能失敗或結構不符)
+                    self._load_optimizer_state_dict_safe(optimizer, opt_state)
+                    # 保留原始 state 用於後續遷移
+                    legacy_state = {k:v for k,v in optimizer.state.items()}
+                except Exception:
+                    legacy_state = None
+
+            # 決定是否需要重建 param groups
+            if _needs_rebuild(optimizer):
+                if self.rank == 0:
+                    print("   ⚠️ Detected legacy/invalid optimizer param_groups → rebuilding AdamW")
+                # 獲取 lr（從 opt_state 或 fallback）
+                lr_guess = 1e-3
+                try:
+                    if optimizer and optimizer.param_groups:
+                        lr_guess = optimizer.param_groups[0].get('lr', lr_guess)
+                except Exception:
+                    pass
+                # 重建 AdamW (這會覆寫 self.opt)
+                self.build_adamw_optimizer(lr_guess, saved_wd)
+                if optimizer is not self.opt:
+                    optimizer = self.opt
+                # 遷移狀態
+                if legacy_state:
+                    _migrate_state(legacy_state, optimizer)
+            else:
+                # 若結構正常，確保 current_weight_decay 與 group 一致
+                try:
+                    has_decay = False
+                    for pg in optimizer.param_groups:
+                        if pg.get('weight_decay',0.0)>0:
+                            has_decay = True
+                            if abs(pg['weight_decay']-saved_wd)>1e-12:
+                                if self.rank==0:
+                                    print(f"   ⚠️ Mismatch wd(group={pg['weight_decay']}) vs saved({saved_wd}), syncing to saved")
+                                pg['weight_decay']=saved_wd
+                    if not has_decay and saved_wd>0:
+                        if self.rank==0:
+                            print("   ⚠️ Saved checkpoint had weight_decay>0 but current groups have none; rebuilding")
+                        lr_guess = optimizer.param_groups[0].get('lr',1e-3)
+                        self.build_adamw_optimizer(lr_guess, saved_wd)
+                except Exception:
+                    pass
+
             start_epoch = checkpoint['epoch'] + 1
             self.global_step_offset = checkpoint.get('global_step_offset', 0)
-            
-            # Restore key parameters to ensure consistency
             self.Re = checkpoint.get('Re', self.Re)
             self.alpha_evm = checkpoint.get('alpha_evm', self.alpha_evm)
-            
+            if self.rank == 0:
+                print(f"   Restored weight decay: {self.current_weight_decay}")
             self.logger.info(f"✅ Resumed training from checkpoint: {checkpoint_path} at epoch {start_epoch}")
-            
-            # Move optimizer states to the correct device
             for state in optimizer.state.values():
                 for k, v in state.items():
                     if isinstance(v, torch.Tensor):
                         state[k] = v.to(self.device)
-
+            # Scheduler 可能先前尚未構建（需訓練循環注入），此處僅保留 wd
             return start_epoch
-
         except Exception as e:
             self.logger.error(f"Failed to load checkpoint from {checkpoint_path}: {e}")
             return 0 # Start from scratch if loading fails
+        # (legacy duplicate implementation removed)
             
     def init_vis_t(self):
         """優化版本：避免不必要的CPU轉換"""
@@ -456,6 +550,36 @@ class PysicsInformedNeuralNetwork:
         if params_nodecay:
             groups.append({'params': params_nodecay, 'weight_decay': 0.0})
         return groups
+
+    def print_optimizer_groups(self):
+        """診斷輸出目前 AdamW 參數組資訊。"""
+        if self.opt is None:
+            if self.rank == 0:
+                print("   (optimizer not initialized)")
+            return
+        if self.rank != 0:
+            return
+        try:
+            total_params = 0
+            print("--- Optimizer Param Groups (AdamW) ---")
+            for i, g in enumerate(self.opt.param_groups):
+                params = g.get('params', [])
+                count = sum(p.numel() for p in params if isinstance(p, torch.Tensor))
+                total_params += count
+                wd = g.get('weight_decay', 0.0)
+                sample_names = []
+                # 取前3個名稱
+                name_map = self._param_name_map(self.get_model(self.net)) | self._param_name_map(self.get_model(self.net_1))
+                for p in params[:3]:
+                    n = name_map.get(id(p), 'unknown')
+                    sample_names.append(n)
+                print(f"Group {i}: params={count}, wd={wd}, sample={sample_names}")
+            print(f"Total trainable params: {total_params}")
+            print(f"Current weight_decay tracked: {getattr(self,'current_weight_decay',0.0)}")
+            print("--------------------------------------")
+        except Exception as e:
+            if self.rank == 0:
+                print(f"   ⚠️ print_optimizer_groups error: {e}")
 
     def build_adamw_optimizer(self, lr: float, weight_decay: float):
         """建立新的 AdamW 並更新 self.opt，同時保留 scheduler 連續性資訊。"""
@@ -1408,12 +1532,13 @@ class PysicsInformedNeuralNetwork:
             for group in self.opt.param_groups:
                 group['initial_lr'] = current_lr
         
-        # 段後解鎖/解凍並重建scheduler以绑定新的optimizer
+        # 段後解鎖/解凍：先解凍但暫不重建，接著統一以 AdamW + scheduler 重建
         self.lock_vis_t_minus = False
         try:
-            self.defreeze_evm_net(self.stage_step)
+            self.defreeze_evm_net(self.stage_step, rebuild=False)
         except Exception:
             pass
+        # AdamW 已於上方 build_adamw_optimizer 重建；此處只需 scheduler 重建
         self._rebuild_scheduler()
         
         # 如果L-BFGS失敗且有備份，嘗試恢復Adam狀態
@@ -1921,48 +2046,25 @@ class PysicsInformedNeuralNetwork:
             total_trainable = sum(p.numel() for g in self.opt.param_groups for p in g['params'])
             print(f"  Active parameters (net only): {total_trainable}")
 
-    def defreeze_evm_net(self, epoch_id):
+    def defreeze_evm_net(self, epoch_id, rebuild: bool = True):
         """
-        解凍EVM網路參數 - 保持scheduler連續性
+        解凍EVM網路參數
+        rebuild=True 時會呼叫 rebuild_after_structure_change 以重建 AdamW / scheduler
         """
         if self.rank == 0:
             print(f"[Epoch {epoch_id}] Unfreezing EVM network parameters (保持scheduler連續性)")
-        
-        # 解凍net_1的所有參數
+        # 解凍 net_1 參數
         for param in self.net_1.parameters():
             param.requires_grad = True
-    
-        # 更新optimizer的參數組包含所有參數
-        all_params = []
-        for param in list(self.net.parameters()) + list(self.net_1.parameters()):
-            if param.requires_grad:
-                all_params.append(param)
-        
-        # 保存當前學習率
-        current_lr = self.opt.param_groups[0]['lr'] if self.opt else 1e-3
-        
-        # 重新初始化優化器以確保參數組同步
-        if len(all_params) > 0:
-            optimizer_class = type(self.opt)
-            self.opt = optimizer_class(all_params, lr=current_lr)
-            self.opt.state.clear()
-            
-            # 確保有initial_lr參數（僅在缺失時補上，避免覆寫stage基準lr）
-            for group in self.opt.param_groups:
-                if 'initial_lr' not in group:
-                    group['initial_lr'] = current_lr
-            
-            # 穩健重建：解凍後重建scheduler以綁定新optimizer並保持進度/學習率連續
-            self._rebuild_scheduler()
-            
-            if self.rank == 0:
-                print(f"  Optimizer重建，保持lr={current_lr:.6f}，參數數量: {len(all_params)}")
-        else:
-            if self.rank == 0:
-                print("  No active parameters found for both networks, optimizer not reinitialized.")
-        
-        if self.rank == 0:
-            print(f"  Active parameters: {len(all_params)} (net + net_1)")
+        if rebuild:
+            try:
+                self.rebuild_after_structure_change()
+            except Exception:
+                pass
+        if self.rank == 0 and self.opt is not None:
+            total_trainable = sum(p.numel() for p in list(self.get_model(self.net).parameters()) if p.requires_grad) + \
+                               sum(p.numel() for p in list(self.get_model(self.net_1).parameters()) if p.requires_grad)
+            print(f"  Active parameters (net + net_1): {total_trainable}")
 
     def _rebuild_scheduler(self):
         """重建scheduler以绑定新的optimizer，確保學習率連續性"""
@@ -2192,35 +2294,20 @@ class PysicsInformedNeuralNetwork:
             return True  # 驗證錯誤時繼續訓練
 
     def rebuild_optimizer_groups(self):
-        """重建optimizer參數群組以修復DDP問題"""
+        """統一重建 AdamW 參數群組 (DDP 恢復 / 結構變更)。"""
         try:
-            # 獲取所有需要梯度的參數
-            all_params = []
-            for param in self.net.parameters():
-                if param.requires_grad:
-                    all_params.append(param)
-            for param in self.net_1.parameters():
-                if param.requires_grad:
-                    all_params.append(param)
-            
-            if len(all_params) > 0:
-                # 保存當前學習率和其他配置
-                current_lr = self.opt.param_groups[0]['lr']
-                current_config = {k: v for k, v in self.opt.param_groups[0].items() if k != 'params'}
-                
-                # 更新參數列表
-                self.opt.param_groups[0]['params'] = all_params
-                
-                # 恢復其他配置
-                for key, value in current_config.items():
-                    self.opt.param_groups[0][key] = value
-                    
-                if self.rank == 0:
-                    print(f"   Rebuilt optimizer with {len(all_params)} parameters")
-                    
+            if self.opt is None or not hasattr(self, 'current_weight_decay'):
+                # 若尚未初始化，使用預設 lr / wd
+                self.build_adamw_optimizer(1e-3, getattr(self, 'current_weight_decay', 0.0))
+                return
+            current_lr = self.opt.param_groups[0].get('lr', 1e-3)
+            wd = getattr(self, 'current_weight_decay', 0.0)
+            self.build_adamw_optimizer(current_lr, wd)
+            if self.rank == 0:
+                print(f"   ✅ DDP恢復: 重新構建 AdamW (lr={current_lr:.2e}, wd={wd})")
         except Exception as e:
             if self.rank == 0:
-                print(f"   Failed to rebuild optimizer groups: {e}")
+                print(f"   ❌ DDP恢復重建失敗: {e}")
             raise e
 
     def print_log_full_batch_with_time_estimate(self, loss, losses, epoch_id, num_epoch, data_points):

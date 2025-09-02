@@ -155,6 +155,46 @@ training:
 | 快速探索 | [5e-6,2e-6,1e-6,5e-7,0.0] | 較少正則，適合架構/α_EVM 測試 |
 | 高穩定需求 | [2e-5,1e-5,5e-6,2e-6,1e-6] | 降低早期梯度噪聲，稍慢 |
 
+### 🛡️ Checkpoint 自動驗證 & Optimizer 診斷
+
+新增強化機制：載入 checkpoint 時自動驗證 AdamW 參數組結構，必要時重建並遷移動量。
+
+**觸發條件**：
+- `param_groups` 為空 / >2 組（非預期自定義）
+- 無 decay 組但 checkpoint 標記曾使用 `current_weight_decay>0`
+- 參數組缺失 `params` 欄位（舊版異常）
+
+**自動修復流程**：
+1. 讀取 `current_weight_decay`
+2. 嘗試載入舊 `optimizer_state_dict`
+3. 若結構不合法 → 以保存的 lr / wd 重建 AdamW (decay + nodecay 兩組)
+4. 以 `id(param)` 對應遷移 `exp_avg`, `exp_avg_sq`, `step`（錯配安全跳過）
+5. 同步 Tensor 至正確裝置
+
+**遷移日誌例**：
+```
+⚠️ Detected legacy/invalid optimizer param_groups → rebuilding AdamW
+🔄 Optimizer state migrated: 342 tensors (skipped 8)
+```
+
+**診斷工具**：
+```python
+PINN.print_optimizer_groups()
+```
+輸出：每組參數數量、weight_decay、樣本參數名稱、總訓練參數、追蹤中的 `current_weight_decay`。
+
+**建議檢查時機**：
+- 恢復訓練後第一個 Stage 開始前
+- L-BFGS 段結束後 AdamW 重建後
+- 調參測試新 weight_decay_stages 序列時
+
+**常見異常對應**：
+| 現象 | 日誌訊息 | 處理 |
+|------|----------|------|
+| wd mismatch | `Mismatch wd(group=...) vs saved(...)` | 已自動同步，無需手動介入 |
+| 缺 decay 組 | `Saved checkpoint had weight_decay>0 but current groups have none; rebuilding` | 系統自動重建 |
+| 遷移部分失敗 | `Optimizer state migrated: X tensors (skipped Y)` | 可忽略，少量 skip 不影響長程收斂 |
+
 ---
 
 ### 🚀 分佈式訓練 (SLURM + torchrun)
