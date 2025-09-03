@@ -39,6 +39,10 @@ python test.py
 
 # 🔧 P100 兼容性檢查
 python test_p100_compatibility.py
+
+# 🔎 單檔推論（單一 unified checkpoint）
+python predict.py --checkpoint ~/NSFnet/ev-NSFnet/results/Re5000/6x80_Nf200k_lamB10_alpha0.03Stage_1/checkpoint_epoch_300000.pth \
+                  --output_dir results/single_predict/ckpt_300000
 ```
 
 ## 🏗️ 專案架構
@@ -55,6 +59,7 @@ ev-NSFnet/
 ├── 🐍 pinn_solver.py         # 核心求解器類
 ├── 🐍 net.py                # 神經網路架構
 ├── 🐍 train.py              # 分佈式訓練入口
+├── 🐍 predict.py            # 單檔 unified checkpoint 推論
 ├── 🐍 cavity_data.py         # 資料載入工具
 ├── 🐍 tsa_activation.py      # TSA 激活函數
 └── 📜 train.sh              # SLURM 分佈式腳本
