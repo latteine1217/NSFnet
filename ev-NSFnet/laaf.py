@@ -21,12 +21,12 @@ import torch.nn as nn
 class LAAFScalar(nn.Module):
     """Layer-wise LAAF with a single learnable scale per activation layer.
 
-    y = tanh(a * x), where a = softplus(a_raw) + eps to ensure positivity.
+    y = tanh(a * x), where a = abs(a_raw) + eps to ensure positivity.
 
     Args:
         init_scale: Initial value for a (>0). Default 1.0.
         max_scale: Optional clamp upper bound for a (e.g., 20.0).
-        eps: Small epsilon added to softplus to keep strictly positive.
+        eps: Small epsilon added to abs to keep strictly positive.
 
     Shape:
         - Input: (N, D)
@@ -39,17 +39,15 @@ class LAAFScalar(nn.Module):
         if init_scale <= 0:
             # 防止非法初始化
             init_scale = 1.0
-        # 反向 softplus 以得到 a_raw 的初始化
-        # softplus(x) ~= ln(1+e^x), inverse approximation for positive init
-        a_raw_init = torch.log(torch.expm1(torch.tensor(init_scale)))
-        self.a_raw = nn.Parameter(a_raw_init.view(1))
+        # 直接使用 init_scale 初始化
+        self.a_raw = nn.Parameter(torch.tensor(init_scale).view(1))
         self.max_scale = None if max_scale is None else float(max_scale)
         self.eps = float(eps)
 
     @property
     def a(self) -> torch.Tensor:
-        """Positive scale a = softplus(a_raw) + eps, optionally clamped."""
-        a_pos = torch.nn.functional.softplus(self.a_raw) + self.eps
+        """Positive scale a = abs(a_raw) + eps, optionally clamped."""
+        a_pos = torch.abs(self.a_raw) + self.eps
         if self.max_scale is not None:
             return torch.clamp(a_pos, max=self.max_scale)
         return a_pos
