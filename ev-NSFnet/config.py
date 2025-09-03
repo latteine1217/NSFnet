@@ -24,6 +24,12 @@ class NetworkConfig:
     first_layer_scale_evm: float = 1.2
     last_layer_scale_evm: float = 0.1
     evm_output_activation: str = "softplus_cap"  # 可選：softplus_cap | abs_cap
+    # Activation settings
+    activation_main: str = "tanh"      # 可選：tanh | laaf
+    activation_evm: str = "tanh"       # 可選：tanh | laaf
+    laaf_init_scale: float = 1.0       # LAAF 初始化 a
+    laaf_max_scale: float = 20.0       # LAAF 上限（避免暴衝）
+    laaf_reg_lambda: float = 0.0       # LAAF 正則權重（0關閉）
 
 @dataclass
 class LBFGSConfig:

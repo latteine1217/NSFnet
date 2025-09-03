@@ -6,12 +6,22 @@ network:
   layers_1: 4
   hidden_size: 80
   hidden_size_1: 40
+  # 精細配置每層神經元數量（可選）
+  # hidden_sizes: [80, 80, 60, 60, 40, 40]      # 主網路6層的神經元數量
+  # hidden_sizes_1: [40, 30, 30, 20]           # EVM網路4層的神經元數量
+  # 注意：如果提供hidden_sizes，其長度必須等於對應的layers數量
   # 首/末層縮放與EVM激活
-  first_layer_scale_main: 1.2
-  last_layer_scale_main: 0.6
+  first_layer_scale_main: 1.0   # 啟用LAAF時放緩首層縮放，避免疊加過大
+  last_layer_scale_main: 0.5
   first_layer_scale_evm: 1.2
   last_layer_scale_evm: 0.2
   evm_output_activation: abs_cap
+  # Activations
+  activation_main: laaf   # 主網啟用 Layer-wise LAAF
+  activation_evm: tanh    # EVM 保持 tanh
+  laaf_init_scale: 1.0    # a 初始值
+  laaf_max_scale: 20.0    # a 上限，避免暴衝
+  laaf_reg_lambda: 1.0e-4 # LAAF 輕度正則
 
 training:
   N_f: 120000

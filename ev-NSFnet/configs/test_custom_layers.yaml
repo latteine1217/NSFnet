@@ -1,0 +1,99 @@
+experiment_name: "NSFnet_CustomLayers_Test"
+description: "測試精細配置每層神經元數量功能"
+
+network:
+  layers: 6
+  layers_1: 4
+  # 傳統配置方式
+  hidden_size: 80
+  hidden_size_1: 40
+  
+  # 精細配置每層神經元數量（啟用時會覆蓋hidden_size）
+  hidden_sizes: [100, 80, 60, 50, 40, 30]    # 主網路：遞減式架構
+  hidden_sizes_1: [50, 35, 25, 15]           # EVM網路：小型遞減架構
+  
+  # 首/末層縮放與EVM激活
+  first_layer_scale_main: 1.0
+  last_layer_scale_main: 0.5
+  first_layer_scale_evm: 1.2
+  last_layer_scale_evm: 0.2
+  evm_output_activation: abs_cap
+  
+  # Activations
+  activation_main: laaf
+  activation_evm: tanh
+  laaf_init_scale: 1.0
+  laaf_max_scale: 20.0
+  laaf_reg_lambda: 1.0e-4
+
+training:
+  N_f: 120000
+  batch_size: null
+  checkpoint_freq: 10000
+  log_tips: true
+  sort_by_boundary_distance: false
+  pde_distance_weighting: true
+  pde_distance_w_min: 0.2
+  pde_distance_tau: 0.2
+  training_stages:
+    - [0.05, 50000, 1e-3, Constant]     # 縮短測試時間
+    - [0.01, 50000, 2e-4, Constant]
+    - [0.005, 50000, 4e-5, Constant]
+  weight_decay_stages: [1.0e-5, 5.0e-6, 5.0e-6]
+
+  # SGDR scheduler parameters
+  sgdr:
+    warmup_epochs: 1000
+    T_0: 10000
+    T_mult: 2
+    start_factor: 0.1
+    end_factor: 1.0
+    eta_min: 1e-6
+
+  # L-BFGS配置（簡化測試）
+  lbfgs:
+    enabled_in_distributed: false
+    enable_from_stage: 2     # 從Stage 2開始
+    trigger_window_per_stage: [5000, 7500]
+    min_improve_pct_per_stage: [0.02, 0.015]
+    ema_gamma: 0.95
+    use_simple_grad_check: true
+    grad_median_abs_thresh: 0.002
+    grad_relative_factor: 0.02
+    grad_cos_ema_thresh: 0.9
+    alpha_evm_threshold: 0.02
+    cap_ratio_threshold: 0.7
+    cooldown_steps: 5000
+    freeze_evm_during_lbfgs: true
+    max_outer_steps: 30      # 減少測試時間
+    timeout_seconds: 180     # 減少測試時間
+    max_iter: 8
+    history_size: 15
+    tolerance_grad: 1e-6
+    tolerance_change: 1e-8
+    line_search_fn: "strong_wolfe"
+    early_stop_patience: 5
+    early_stop_min_delta: 1e-4
+    checkpoint_before_lbfgs: true
+
+physics:
+  Re: 3000
+  alpha_evm: 0.05
+  beta: 5.0
+  bc_weight: 10.0
+  eq_weight: 1.0
+
+supervision:
+  enabled: false     # 簡化測試
+  data_points: 0
+  weight: 0.0
+
+system:
+  device: "auto"
+  precision: "float32"
+  tensorboard_enabled: true
+  log_level: "INFO"
+  memory_limit_gb: 14.0
+  gradient_clip_norm: 1.0
+  memory_cleanup_freq: 100
+  epoch_times_limit: 1000

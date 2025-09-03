@@ -24,10 +24,19 @@ class FCNet(torch.nn.Module):
                  num_outs=3,
                  num_layers=10,
                  hidden_size=50,
+                 hidden_sizes=None,
                  activation=torch.nn.Tanh):
         super(FCNet, self).__init__()
 
-        layers = [num_ins] + [hidden_size] * num_layers + [num_outs]
+        # 支援兩種配置模式：
+        # 1. hidden_size: 所有隱藏層使用相同神經元數量
+        # 2. hidden_sizes: 每層神經元數量列表
+        if hidden_sizes is not None:
+            if len(hidden_sizes) != num_layers:
+                raise ValueError(f"hidden_sizes長度({len(hidden_sizes)})必須等於num_layers({num_layers})")
+            layers = [num_ins] + hidden_sizes + [num_outs]
+        else:
+            layers = [num_ins] + [hidden_size] * num_layers + [num_outs]
         # parameters
         self.depth = len(layers) - 1
 
@@ -39,7 +48,14 @@ class FCNet(torch.nn.Module):
             layer_list.append(
                 ('layer_%d' % i, torch.nn.Linear(layers[i], layers[i + 1]))
             )
-            layer_list.append(('activation_%d' % i, self.activation()))
+            # 嘗試以工廠方式建立可帶參數activation（相容LAAF與Tanh）
+            act = None
+            try:
+                act = self.activation()
+            except TypeError:
+                # 若activation需要形狀資訊，可於此傳入（目前Layer-wise LAAF不需要）
+                act = self.activation()
+            layer_list.append((f'activation_{i}', act))
 
         layer_list.append(
             ('layer_%d' % (self.depth - 1), torch.nn.Linear(layers[-2], layers[-1]))

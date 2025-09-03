@@ -18,6 +18,7 @@ import scipy.io
 import numpy as np
 import math
 from net import FCNet
+from laaf import LAAFScalar, compute_laaf_regularization
 from tools import setup_device, get_cuda_info
 from typing import Dict, List, Set, Optional, Union, Callable, Any, Tuple
 import warnings
@@ -186,9 +187,9 @@ class PysicsInformedNeuralNetwork:
 
         # initialize NN
         self.net = self.initialize_NN(
-                num_ins=num_ins, num_outs=num_outs, num_layers=layers, hidden_size=hidden_size).to(self.device)
+                num_ins=num_ins, num_outs=num_outs, num_layers=layers, hidden_size=hidden_size, is_evm=False).to(self.device)
         self.net_1 = self.initialize_NN(
-                num_ins=num_ins, num_outs=num_outs_1, num_layers=layers_1, hidden_size=hidden_size_1).to(self.device)
+                num_ins=num_ins, num_outs=num_outs_1, num_layers=layers_1, hidden_size=hidden_size_1, is_evm=True).to(self.device)
 
         
 
@@ -625,7 +626,10 @@ class PysicsInformedNeuralNetwork:
         return 0.0
 
     def check_tanh_saturation(self, epoch_id):
-        """檢測tanh激活函數飽和情況（使用全域步數串接所有stage）"""
+        """檢測激活函數飽和情況（tanh 或 LAAF+tnah）使用全域步數串接所有stage。
+
+        對於 LAAF，飽和條件以 |a * pre| > 2 估算。
+        """
         if epoch_id % 1000 == 0 and self.rank == 0:  # 頻率控制仍沿用呼叫端 + 1000步節流
             # 全域步數（跨 stage 單調遞增）避免TensorBoard覆寫
             global_step = getattr(self, 'global_step_offset', 0) + epoch_id
@@ -635,24 +639,86 @@ class PysicsInformedNeuralNetwork:
             with torch.no_grad():
                 test_input = torch.cat([self.x_f[:100], self.y_f[:100]], dim=1)
                 layer_count = 0
-                for name, module in self.get_model(self.net).named_modules():
-                    if isinstance(module, torch.nn.Linear):
-                        pre_activation = torch.matmul(test_input, module.weight.T) + module.bias
-                        saturation_ratio = (pre_activation.abs() > 2.0).float().mean().item()
-                        saturation_info.append((f"主網絡_Layer{layer_count}", saturation_ratio))
-                        test_input = torch.tanh(pre_activation)
-                        layer_count += 1
+                # 使用Sequential結構配對 Linear -> activation
+                main_layers = getattr(self.get_model(self.net), 'layers', None)
+                if isinstance(main_layers, torch.nn.Sequential):
+                    idx = 0
+                    keys = list(main_layers._modules.keys())
+                    while idx < len(keys):
+                        key = keys[idx]
+                        mod = main_layers._modules[key]
+                        if isinstance(mod, torch.nn.Linear):
+                            pre = torch.matmul(test_input, mod.weight.T) + mod.bias
+                            # 尋找下一個激活
+                            sat_ratio = 0.0
+                            next_act = None
+                            if idx + 1 < len(keys):
+                                next_act = main_layers._modules[keys[idx + 1]]
+                            if isinstance(next_act, torch.nn.Tanh):
+                                sat_ratio = (pre.abs() > 2.0).float().mean().item()
+                                test_input = torch.tanh(pre)
+                            elif isinstance(next_act, LAAFScalar):
+                                # 飽和條件：|a*pre| > 2
+                                a = next_act.a
+                                sat_ratio = ((a * pre).abs() > 2.0).float().mean().item()
+                                test_input = next_act(pre)
+                            else:
+                                # 未知激活，退化為tanh估算
+                                sat_ratio = (pre.abs() > 2.0).float().mean().item()
+                                test_input = torch.tanh(pre)
+                            saturation_info.append((f"主網絡_Layer{layer_count}", sat_ratio))
+                            layer_count += 1
+                            idx += 2
+                        else:
+                            idx += 1
+                else:
+                    # 後備方案：與舊邏輯一致
+                    for name, module in self.get_model(self.net).named_modules():
+                        if isinstance(module, torch.nn.Linear):
+                            pre = torch.matmul(test_input, module.weight.T) + module.bias
+                            sat_ratio = (pre.abs() > 2.0).float().mean().item()
+                            saturation_info.append((f"主網絡_Layer{layer_count}", sat_ratio))
+                            test_input = torch.tanh(pre)
+                            layer_count += 1
                 
                 # 檢查EVM網絡
                 test_input_evm = torch.cat([self.x_f[:100], self.y_f[:100]], dim=1)
                 layer_count = 0
-                for name, module in self.get_model(self.net_1).named_modules():
-                    if isinstance(module, torch.nn.Linear):
-                        pre_activation = torch.matmul(test_input_evm, module.weight.T) + module.bias
-                        saturation_ratio = (pre_activation.abs() > 2.0).float().mean().item()
-                        saturation_info.append((f"EVM網絡_Layer{layer_count}", saturation_ratio))
-                        test_input_evm = torch.tanh(pre_activation)
-                        layer_count += 1
+                evm_layers = getattr(self.get_model(self.net_1), 'layers', None)
+                if isinstance(evm_layers, torch.nn.Sequential):
+                    idx = 0
+                    keys = list(evm_layers._modules.keys())
+                    while idx < len(keys):
+                        key = keys[idx]
+                        mod = evm_layers._modules[key]
+                        if isinstance(mod, torch.nn.Linear):
+                            pre = torch.matmul(test_input_evm, mod.weight.T) + mod.bias
+                            next_act = None
+                            if idx + 1 < len(keys):
+                                next_act = evm_layers._modules[keys[idx + 1]]
+                            if isinstance(next_act, torch.nn.Tanh):
+                                sat_ratio = (pre.abs() > 2.0).float().mean().item()
+                                test_input_evm = torch.tanh(pre)
+                            elif isinstance(next_act, LAAFScalar):
+                                a = next_act.a
+                                sat_ratio = ((a * pre).abs() > 2.0).float().mean().item()
+                                test_input_evm = next_act(pre)
+                            else:
+                                sat_ratio = (pre.abs() > 2.0).float().mean().item()
+                                test_input_evm = torch.tanh(pre)
+                            saturation_info.append((f"EVM網絡_Layer{layer_count}", sat_ratio))
+                            layer_count += 1
+                            idx += 2
+                        else:
+                            idx += 1
+                else:
+                    for name, module in self.get_model(self.net_1).named_modules():
+                        if isinstance(module, torch.nn.Linear):
+                            pre = torch.matmul(test_input_evm, module.weight.T) + module.bias
+                            sat_ratio = (pre.abs() > 2.0).float().mean().item()
+                            saturation_info.append((f"EVM網絡_Layer{layer_count}", sat_ratio))
+                            test_input_evm = torch.tanh(pre)
+                            layer_count += 1
             
             # 輸出診斷信息
             high_saturation_layers = [(name, ratio) for name, ratio in saturation_info if ratio > 0.3]
@@ -723,12 +789,50 @@ class PysicsInformedNeuralNetwork:
                       num_ins=3,
                       num_outs=3,
                       num_layers=10,
-                      hidden_size=50):
+                      hidden_size=50,
+                      is_evm: bool = False):
+        """建立主網/副網，根據配置選擇激活函數（支援 LAAF）和神經元數量。"""
+        activation_factory = torch.nn.Tanh
+        hidden_sizes = None
+        
+        cfg = getattr(self, 'config', None)
+        if cfg is not None and hasattr(cfg, 'network'):
+            ncfg = cfg.network
+            
+            # 獲取每層神經元配置
+            if is_evm:
+                # EVM網路配置
+                if hasattr(ncfg, 'hidden_sizes_1') and ncfg.hidden_sizes_1 is not None:
+                    hidden_sizes = ncfg.hidden_sizes_1
+                    if len(hidden_sizes) != num_layers:
+                        self.logger.warning(f"EVM hidden_sizes_1長度({len(hidden_sizes)})與layers_1({num_layers})不符，使用hidden_size_1")
+                        hidden_sizes = None
+            else:
+                # 主網路配置  
+                if hasattr(ncfg, 'hidden_sizes') and ncfg.hidden_sizes is not None:
+                    hidden_sizes = ncfg.hidden_sizes
+                    if len(hidden_sizes) != num_layers:
+                        self.logger.warning(f"主網 hidden_sizes長度({len(hidden_sizes)})與layers({num_layers})不符，使用hidden_size")
+                        hidden_sizes = None
+            
+            # 選擇 main 或 evm 的 activation 設定
+            act_name = (ncfg.activation_evm if is_evm else ncfg.activation_main).strip().lower()
+            if act_name == 'laaf':
+                init_scale = float(getattr(ncfg, 'laaf_init_scale', 1.0))
+                max_scale = float(getattr(ncfg, 'laaf_max_scale', 20.0))
+                # 以偏函式方式提供 layer-wise 參數
+                def _factory():
+                    return LAAFScalar(init_scale=init_scale, max_scale=max_scale)
+                activation_factory = _factory
+            else:
+                activation_factory = torch.nn.Tanh
+                
         return FCNet(num_ins=num_ins,
                      num_outs=num_outs,
                      num_layers=num_layers,
                      hidden_size=hidden_size,
-                     activation=torch.nn.Tanh)
+                     hidden_sizes=hidden_sizes,
+                     activation=activation_factory)
 
     def set_eq_training_func(self, train_data_func):
         self.train_data_func = train_data_func
@@ -1118,6 +1222,20 @@ class PysicsInformedNeuralNetwork:
                 net_reg = sum(p.pow(2).sum() for p in params_main)
                 net1_reg = sum(p.pow(2).sum() for p in params_evm)
                 self.loss = self.loss + regularization_weight * (net_reg + net1_reg)
+
+        # LAAF 正則化（可選）
+        try:
+            ncfg = getattr(self.config, 'network', None)
+            laaf_lambda = float(getattr(ncfg, 'laaf_reg_lambda', 0.0)) if ncfg is not None else 0.0
+        except Exception:
+            laaf_lambda = 0.0
+        if laaf_lambda > 0.0:
+            try:
+                reg_main = compute_laaf_regularization(self.get_model(self.net), target=1.0)
+                reg_evm = compute_laaf_regularization(self.get_model(self.net_1), target=1.0)
+                self.loss = self.loss + laaf_lambda * (reg_main + reg_evm)
+            except Exception:
+                pass
 
 
         # 創建用於backward的loss（保持梯度）

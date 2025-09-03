@@ -6,11 +6,16 @@ network:
   layers_1: 2
   hidden_size: 20
   hidden_size_1: 10
-  first_layer_scale_main: 2.0
+  first_layer_scale_main: 1.0
   last_layer_scale_main: 0.5
   first_layer_scale_evm: 1.2
   last_layer_scale_evm: 0.1
   evm_output_activation: softplus_cap
+  activation_main: laaf
+  activation_evm: tanh
+  laaf_init_scale: 1.0
+  laaf_max_scale: 20.0
+  laaf_reg_lambda: 1.0e-4
 
 training:
   N_f: 1000

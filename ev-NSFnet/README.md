@@ -99,18 +99,18 @@ training:
 - **最終精度**: 改善 5-10%  
 - **穩定性**: 減少 30% 訓練發散風險
 
-## 🔧 分佈式訓練 & L-BFGS 自適應優化
+## 🔧 分佈式訓練 & 企業級優化
 
-### 🧩 Per-Stage AdamW & Weight Decay 策略
+### 🧩 AdamW + Decoupled Weight Decay 策略
 
 引入 **分階段 AdamW + 解耦 weight decay**，搭配多階段 α_EVM / lr 設計，使早期具備較強平滑與正則，中後期逐步降低衰減，最後階段關閉，以保留細節。
 
-**為何不用傳統 L2？**  
+**為何選擇 AdamW？** ✨  
 AdamW 透過 decoupled decay 對參數施加 `w ← w - lr * wd * w`，不干擾一階動量估計，較傳統 L2 (coupled) 在 PINN 長程收斂更穩定。
 
 **參數分組規則**：
-- 施加 decay：`p.dim() > 1` 且 參數名稱不以 `bias` 結尾（權重矩陣、卷積核）
-- 不施加 decay：偏置項、一維標量（例如 LayerNorm 等，若未來擴充）
+- **施加 decay**：`p.dim() > 1` 且參數名稱不以 `bias` 結尾（權重矩陣、卷積核）
+- **不施加 decay**：偏置項、一維標量（例如 LayerNorm 等，若未來擴充）
 
 **配置範例 (production.yaml)**：
 ```yaml
@@ -123,7 +123,6 @@ training:
     - [0.001, 300000, 2e-6, Constant]
   weight_decay_stages: [1.0e-5, 5.0e-6, 5.0e-6, 2.0e-6, 0.0]
 ```
-> 長度需與 `training_stages` 對齊，不一致會自動裁剪 / 補齊（尾值填充）。
 
 **建議調參邏輯**：
 | 目標 | 建議行為 |
@@ -222,13 +221,58 @@ torchrun --nproc_per_node=2 train.py --config configs/production.yaml
 
 ### 🧠 神經網路設計
 
-```python
-# 主網路: Navier-Stokes + 連續方程
-Main Net: 6 layers × 80 neurons → [u, v, p]
+#### 🎯 網路架構配置
 
-# EVM 副網路: Entropy residual → Artificial viscosity  
+**靈活的神經元配置系統**：支援固定尺寸與精細層級配置兩種模式
+
+```python
+# 模式1: 傳統固定尺寸
+Main Net: 6 layers × 80 neurons → [u, v, p]
 EVM Net: 4 layers × 40 neurons → [ν_art]
+
+# 模式2: 精細層級配置（新功能✨）
+Main Net: [100, 80, 60, 50, 40, 30] neurons → [u, v, p] 
+EVM Net: [50, 35, 25, 15] neurons → [ν_art]
 ```
+
+**配置範例**：
+```yaml
+network:
+  # 方式1: 固定尺寸（向後相容）
+  layers: 6
+  hidden_size: 80
+  
+  # 方式2: 精細配置每層神經元數量 🎯
+  hidden_sizes: [100, 80, 60, 50, 40, 30]  # 遞減式架構
+  hidden_sizes_1: [50, 35, 25, 15]         # EVM網路獨立配置
+```
+
+#### 🔥 LAAF 激活函數系統
+
+**Layer-wise Adaptive Activation Function (LAAF)**：專為 PINN 優化的可學習激活函數
+
+```python
+# 傳統激活 vs LAAF
+activation_main: tanh    # 標準雙曲正切
+activation_main: laaf    # 可學習自適應激活函數 ✨
+
+# LAAF 核心參數
+laaf_init_scale: 1.0     # 初始縮放係數 a
+laaf_max_scale: 20.0     # 縮放上限，防止梯度爆炸
+laaf_reg_lambda: 1.0e-4  # L2正則化係數
+```
+
+**LAAF 數學形式**：
+```
+f_LAAF(x) = a × tanh(x)
+其中 a 為可學習參數，每層獨立優化
+```
+
+**核心優勢**：
+- 🚀 **自適應能力**：每層自動學習最優激活強度
+- 🎯 **PINN 特化**：針對物理方程殘差優化設計  
+- 🛡️ **數值穩定**：內建上限與正則化機制
+- ⚡ **即插即用**：完全相容現有網路架構
 
 ### 🔬 物理模型
 
@@ -283,6 +327,9 @@ export TORCHDYNAMO_DISABLE=1
 # 快速測試配置
 python train.py --config configs/test.yaml --dry-run
 
+# 精細神經元配置測試 ✨
+python train.py --config configs/test_custom_layers.yaml
+
 # 批次效能測試  
 cd batch_size_test && ./run_batch_test.sh
 
@@ -297,7 +344,8 @@ python train.py --config configs/production.yaml --resume logs/latest.pth
 - **物理損失**: `Physics/Total_Loss`, `PDE/[u,v,p]_residual`
 - **邊界條件**: `BC/[top,bottom,left,right]_loss`  
 - **EVM 效能**: `EVM/alpha_current`, `EVM/cap_ratio`
-- **優化狀態**: `Training/LearningRate`, `LBFGS/Triggered`
+- **優化狀態**: `Training/LearningRate`, `Training/WeightDecay`, `LBFGS/Triggered`
+- **LAAF 追蹤**: `LAAF/layer_{i}_scale` - 各層激活函數縮放參數
 
 ---
 
