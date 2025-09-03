@@ -151,6 +151,9 @@ class SystemConfig:
     device: str = "auto"               # 設備選擇 (auto/cpu/cuda)
     precision: str = "float32"         # 精度設置
     tensorboard_enabled: bool = True   # TensorBoard啟用
+    tensorboard_interval: int = 1000   # TensorBoard 寫入間隔（降頻I/O）
+    timing_sync_interval: int = 1000   # GPU 同步/時間估算間隔（降頻同步）
+    ddp_broadcast_buffers: bool = False # DDP 是否同步 buffers（無BN建議關閉）
     log_level: str = "INFO"            # 日誌等級
     memory_limit_gb: float = 14.0      # GPU記憶體限制(GB)
     
