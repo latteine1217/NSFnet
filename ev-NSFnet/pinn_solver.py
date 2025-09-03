@@ -404,8 +404,18 @@ class PysicsInformedNeuralNetwork:
 
         try:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            self.get_model(self.net).load_state_dict(checkpoint['net_state_dict'])
-            self.get_model(self.net_1).load_state_dict(checkpoint['net_1_state_dict'])
+            # 寬鬆載入：允許多出的鍵（例如舊版 LAAF 的 a_raw 參數）
+            res_main = self.get_model(self.net).load_state_dict(checkpoint['net_state_dict'], strict=False)
+            res_evm  = self.get_model(self.net_1).load_state_dict(checkpoint['net_1_state_dict'], strict=False)
+            # 記錄不相容鍵，便於診斷
+            if res_main.unexpected_keys or res_main.missing_keys:
+                self.logger.warning(f"Main net state_dict mismatches. unexpected={len(res_main.unexpected_keys)}, missing={len(res_main.missing_keys)}")
+                # 常見：activation 層的 LAAF 參數 a_raw 來自舊 checkpoint
+                laaf_unexpected = [k for k in res_main.unexpected_keys if 'a_raw' in k]
+                if laaf_unexpected:
+                    self.logger.info(f"Ignored legacy LAAF keys in main net: {laaf_unexpected[:4]}{' ...' if len(laaf_unexpected)>4 else ''}")
+            if res_evm.unexpected_keys or res_evm.missing_keys:
+                self.logger.warning(f"EVM net state_dict mismatches. unexpected={len(res_evm.unexpected_keys)}, missing={len(res_evm.missing_keys)}")
 
             # 先讀取保存的 wd
             saved_wd = checkpoint.get('current_weight_decay', 0.0)
