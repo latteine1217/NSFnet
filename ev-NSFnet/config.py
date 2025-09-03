@@ -158,6 +158,8 @@ class SystemConfig:
     gradient_clip_norm: float = 1.0    # 梯度裁剪
     memory_cleanup_freq: int = 100     # 記憶體清理頻率
     epoch_times_limit: int = 1000      # epoch時間記錄限制
+    # 監測頻率（梯度分佈、EVM上限命中率等）
+    monitor_interval: int = 1000       # 每多少步執行一次監測
 
 @dataclass
 class ExperimentConfig:

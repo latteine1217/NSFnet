@@ -1944,45 +1944,64 @@ class PysicsInformedNeuralNetwork:
             self.stage_step += 1
             self.stage_loss_deque.append(epoch_loss)
             
-            # 監測：梯度分佈與方向穩定性
+            # 監測：梯度分佈與方向穩定性（每 N 步）
             try:
-                grad_norms = []
-                flat_list = []
-                for p in list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters()):
-                    if p.grad is not None:
-                        g = p.grad.detach()
-                        grad_norms.append(g.norm().item())
-                        flat_list.append(g.view(-1).float().cpu())
-                if grad_norms:
-                    import numpy as _np
-                    med = float(_np.median(grad_norms))
-                    q1 = float(_np.percentile(grad_norms, 25))
-                    q3 = float(_np.percentile(grad_norms, 75))
-                    self.grad_median = med
-                    self.grad_iqr = max(q3 - q1, 0.0)
-                    if not hasattr(self, 'grad_baseline'):
-                        self.grad_baseline = med
-                    else:
-                        if self.stage_step < 5000:
-                            self.grad_baseline = 0.99 * self.grad_baseline + 0.01 * med
-                    if flat_list:
-                        g_flat = torch.cat(flat_list)
-                        if hasattr(self, 'prev_grad_flat') and self.prev_grad_flat is not None:
-                            denom = (g_flat.norm() * self.prev_grad_flat.norm()).item() + 1e-12
-                            cos = float((g_flat @ self.prev_grad_flat).item() / denom)
-                            self.grad_cos_ema = 0.9 * float(getattr(self, 'grad_cos_ema', 0.0)) + 0.1 * cos
-                        self.prev_grad_flat = g_flat
+                monitor_interval = 1000
+                try:
+                    if hasattr(self, 'config') and hasattr(self.config, 'system'):
+                        monitor_interval = int(getattr(self.config.system, 'monitor_interval', 1000))
+                except Exception:
+                    monitor_interval = 1000
+                if monitor_interval <= 0:
+                    monitor_interval = 1000
+                if (self.stage_step % monitor_interval) == 0:
+                    grad_norms = []
+                    flat_list = []
+                    for p in list(self.get_model(self.net).parameters()) + list(self.get_model(self.net_1).parameters()):
+                        if p.grad is not None:
+                            g = p.grad.detach()
+                            grad_norms.append(g.norm().item())
+                            # 僅在監測步才做 CPU 拷貝
+                            flat_list.append(g.view(-1).float().cpu())
+                    if grad_norms:
+                        import numpy as _np
+                        med = float(_np.median(grad_norms))
+                        q1 = float(_np.percentile(grad_norms, 25))
+                        q3 = float(_np.percentile(grad_norms, 75))
+                        self.grad_median = med
+                        self.grad_iqr = max(q3 - q1, 0.0)
+                        if not hasattr(self, 'grad_baseline'):
+                            self.grad_baseline = med
+                        else:
+                            if self.stage_step < 5000:
+                                self.grad_baseline = 0.99 * self.grad_baseline + 0.01 * med
+                        if flat_list:
+                            g_flat = torch.cat(flat_list)
+                            if hasattr(self, 'prev_grad_flat') and self.prev_grad_flat is not None:
+                                denom = (g_flat.norm() * self.prev_grad_flat.norm()).item() + 1e-12
+                                cos = float((g_flat @ self.prev_grad_flat).item() / denom)
+                                self.grad_cos_ema = 0.9 * float(getattr(self, 'grad_cos_ema', 0.0)) + 0.1 * cos
+                            self.prev_grad_flat = g_flat
             except Exception:
                 pass
 
-            # 監測：人工黏滯上限命中率（P95）
+            # 監測：人工黏滯上限命中率（P95）（每 N 步）
             try:
-                if hasattr(self, 'vis_t_minus_gpu') and self.vis_t_minus_gpu is not None:
-                    cap_val = float(self.beta) / float(self.Re) if self.beta is not None else (1.0 / float(self.Re))
-                    if cap_val > 0:
-                        sl = min(self.vis_t_minus_gpu.shape[0], 4096)
-                        ratio = (self.vis_t_minus_gpu[:sl] / cap_val).clamp(max=1.0).detach().float().cpu()
-                        self.vis_cap_p95 = float(torch.quantile(ratio.view(-1), 0.95).item())
+                monitor_interval = 1000
+                try:
+                    if hasattr(self, 'config') and hasattr(self.config, 'system'):
+                        monitor_interval = int(getattr(self.config.system, 'monitor_interval', 1000))
+                except Exception:
+                    monitor_interval = 1000
+                if monitor_interval <= 0:
+                    monitor_interval = 1000
+                if (self.stage_step % monitor_interval) == 0:
+                    if hasattr(self, 'vis_t_minus_gpu') and self.vis_t_minus_gpu is not None:
+                        cap_val = float(self.beta) / float(self.Re) if self.beta is not None else (1.0 / float(self.Re))
+                        if cap_val > 0:
+                            sl = min(self.vis_t_minus_gpu.shape[0], 4096)
+                            ratio = (self.vis_t_minus_gpu[:sl] / cap_val).clamp(max=1.0).detach().float().cpu()
+                            self.vis_cap_p95 = float(torch.quantile(ratio.view(-1), 0.95).item())
             except Exception:
                 pass
             # 分佈式L-BFGS觸發檢測
