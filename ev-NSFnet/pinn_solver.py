@@ -1687,6 +1687,11 @@ class PysicsInformedNeuralNetwork:
         # 存储当前scheduler以便在optimizer重建时使用
         self.current_scheduler = scheduler
         self.current_scheduler_params = None
+        # 記錄scheduler名稱（None 視為 Constant），供重建時判斷是否需要靜默跳過
+        try:
+            self.current_scheduler_name = type(scheduler).__name__ if scheduler is not None else 'Constant'
+        except Exception:
+            self.current_scheduler_name = 'Constant'
         if scheduler is not None:
             # 存储scheduler的类型和参数以便重建
             self.current_scheduler_params = {
@@ -2206,9 +2211,15 @@ class PysicsInformedNeuralNetwork:
     def _rebuild_scheduler(self):
         """重建scheduler以绑定新的optimizer，確保學習率連續性"""
         if self.current_scheduler is None or self.current_scheduler_params is None:
-            if self.rank == 0:
-                print("  Warning: 無法重建scheduler - 缺少參數")
-            return
+            # 若為 Constant（未配置scheduler），靜默跳過並保持目前lr，不視為警告
+            if getattr(self, 'current_scheduler_name', 'Constant') == 'Constant':
+                if self.rank == 0:
+                    print("  ℹ️ 跳過scheduler重建：未配置scheduler（Constant），保持lr連續性")
+                return
+            else:
+                if self.rank == 0:
+                    print("  Warning: 無法重建scheduler - 缺少參數")
+                return
             
         try:
             # 保存當前學習率以確保連續性
