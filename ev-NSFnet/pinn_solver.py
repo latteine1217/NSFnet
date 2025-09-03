@@ -87,14 +87,13 @@ class PysicsInformedNeuralNetwork:
                  opt=None,
                  Re = 1000,
                  layers=6,
-                 layers_1=6,
+                 layers_1=4,
                  hidden_size=80,
-                 hidden_size_1=20,
+                 hidden_size_1=40,
                  N_f = 100000,
                  batch_size = None,
                  alpha_evm=0.03,
                  learning_rate=0.001,
-                 # weight_decay 參數已移除：改由 config.training.weight_decay / weight_decay_stages 控制
                  outlet_weight=1,
                  bc_weight=10,
                  eq_weight=1,
@@ -493,7 +492,7 @@ class PysicsInformedNeuralNetwork:
         (_,_,_,e_raw) = self.neural_net_u(self.x_f, self.y_f)
         # 使用配置激活映射得到非負的 EVM 粘滯（未加上限）
         nu_e = self._compute_nu_e(e_raw)
-        cap_val = float(self.beta) / float(self.Re) if self.beta is not None else (1.0 / float(self.Re))
+        cap_val = float(self.beta) / float(self.Re) if self.beta is not None else (self.vis_t0)
         cap = torch.full_like(nu_e, cap_val)
         self.vis_t_minus_gpu = torch.minimum(self.alpha_evm * nu_e.detach(), cap)
 
@@ -939,18 +938,7 @@ class PysicsInformedNeuralNetwork:
         return eq1, eq2, eq3, residual
 
     def _compute_nu_e(self, e_raw: torch.Tensor) -> torch.Tensor:
-        """Compute nonnegative EVM contribution before scaling/capping.
-
-        Uses config.network.evm_output_activation:
-        - 'softplus_cap': softplus(e_raw)
-        - 'abs_cap' (fallback): abs(e_raw)
-        """
-        act = 'softplus_cap'
-        if hasattr(self, 'config') and hasattr(self.config, 'network'):
-            act = str(getattr(self.config.network, 'evm_output_activation', 'softplus_cap')).lower()
-        if act == 'softplus_cap':
-            return torch.nn.functional.softplus(torch.abs(e_raw))
-        # fallback
+        """Compute nonnegative EVM contribution before scaling/capping.""""
         return torch.abs(e_raw)
 
     def compute_gradients_batch(self, outputs: List[torch.Tensor], inputs: List[torch.Tensor]) -> List[List[torch.Tensor]]:
@@ -1017,7 +1005,7 @@ class PysicsInformedNeuralNetwork:
             
             # 在GPU上計算minimum
             vis_t0_tensor = torch.full_like(vis_t_minus_batch, self.vis_t0)
-            beta_cap = torch.full_like(vis_t_minus_batch, (float(self.beta) / float(self.Re)) if self.beta is not None else (1.0 / float(self.Re)))
+            beta_cap = torch.full_like(vis_t_minus_batch, (float(self.beta) / float(self.Re)) if self.beta is not None else (self.vis_t0)
             vis_t = torch.minimum(torch.minimum(vis_t0_tensor, vis_t_minus_batch), beta_cap)
         else:
             # 首次運行或沒有前一步數據
