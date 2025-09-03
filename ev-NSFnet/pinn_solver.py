@@ -142,11 +142,15 @@ class PysicsInformedNeuralNetwork:
         self._tips_last_step = {}
         self.prev_strategy_step = -10**9
 
-        # TensorBoard設定
-        if self.rank == 0:  # 只在主進程創建TensorBoard writer
+        # TensorBoard設定（支援頻率控制與可關閉）
+        sys_cfg = getattr(self, 'config', None)
+        sys_cfg = getattr(sys_cfg, 'system', None) if sys_cfg is not None else None
+        tb_enabled = bool(getattr(sys_cfg, 'tensorboard_enabled', True)) if sys_cfg is not None else True
+        self.tb_interval = int(getattr(sys_cfg, 'tensorboard_interval', 1000)) if sys_cfg is not None else 1000
+        if self.rank == 0 and tb_enabled:
             log_dir = f"runs/NSFnet_Re{Re}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
             self.tb_writer = SummaryWriter(log_dir=log_dir)
-            self.logger.info(f"📊 TensorBoard log directory: {log_dir}")
+            self.logger.info(f"📊 TensorBoard log directory: {log_dir} (interval={self.tb_interval})")
         else:
             self.tb_writer = None
 
@@ -204,18 +208,25 @@ class PysicsInformedNeuralNetwork:
 
         # Wrap models with DDP only if in distributed mode
         if self.world_size > 1:
+            # 從配置讀取 DDP broadcast_buffers 切換（預設 False）
+            ddp_broadcast_buffers = False
+            if self.config is not None and hasattr(self.config, 'system'):
+                try:
+                    ddp_broadcast_buffers = bool(getattr(self.config.system, 'ddp_broadcast_buffers', False))
+                except Exception:
+                    ddp_broadcast_buffers = False
             # 固定前向路徑以關閉未用參數掃描
             self.net = DDP(self.net, 
                            device_ids=[self.local_rank], 
                            output_device=self.local_rank,
                            find_unused_parameters=False,                           
-                           broadcast_buffers=True,        # 確保buffer同步
+                           broadcast_buffers=ddp_broadcast_buffers,        # 可配置的buffer同步
                            gradient_as_bucket_view=True)  # 提升記憶體效率
             self.net_1 = DDP(self.net_1, 
                              device_ids=[self.local_rank], 
                              output_device=self.local_rank,
                              find_unused_parameters=False,                             
-                             broadcast_buffers=True,        # 確保buffer同步
+                             broadcast_buffers=ddp_broadcast_buffers,        # 可配置的buffer同步
                              gradient_as_bucket_view=True)  # 提升記憶體效率
 
         if net_params:
@@ -537,6 +548,33 @@ class PysicsInformedNeuralNetwork:
         else:
             self.beta = 1.0
         self.init_vis_t()
+
+        # === 預計算 PDE 距離權重 w(d)（僅在啟用時，並固定於當前等式點集） ===
+        # 好處：避免每個 epoch 重複計算 exp/min/normalize，降低前向耗時與抖動
+        try:
+            enable_weight = True
+            w_min = 0.2
+            tau = 0.1
+            if hasattr(self, 'config') and hasattr(self.config, 'training'):
+                tr = self.config.training
+                enable_weight = bool(getattr(tr, 'pde_distance_weighting', True))
+                w_min = float(getattr(tr, 'pde_distance_w_min', 0.2))
+                tau = float(getattr(tr, 'pde_distance_tau', 0.1))
+
+            if enable_weight and isinstance(self.x_f, torch.Tensor) and isinstance(self.y_f, torch.Tensor):
+                with torch.no_grad():
+                    d_x = torch.minimum(self.x_f + 1.0, 1.0 - self.x_f)
+                    d_y = torch.minimum(self.y_f + 1.0, 1.0 - self.y_f)
+                    d = torch.minimum(d_x, d_y)
+                    w = w_min + (1.0 - w_min) * torch.exp(-d / max(tau, 1e-6))
+                    # 均值歸一，並固定為常數張量（避免進入計算圖）
+                    w = (w / (w.mean() + 1e-12)).detach()
+                self.w_f = w
+            else:
+                self.w_f = None
+        except Exception:
+            # 保守回退
+            self.w_f = None
 
     def set_optimizers(self, opt):
         self.opt = opt
@@ -907,24 +945,19 @@ class PysicsInformedNeuralNetwork:
         if not getattr(self, 'lock_vis_t_minus', False):
             self.vis_t_minus_gpu = torch.minimum(self.alpha_evm * nu_e_now.detach(), torch.full_like(nu_e_now, cap_val))
 
-        # 座標變換 Jacobian 修正: [0,1]² → [-1,1]²
-        # x = 2X - 1, y = 2Y - 1
-        # ∂/∂X = 2 ∂/∂x, ∂²/∂X² = 4 ∂²/∂x²
-        coord_scale_1st = 2.0   # 一階導數倍數
-        coord_scale_2nd = 4.0   # 二階導數倍數
+        # 定義域已經是 [-1,1]²，梯度即為物理梯度，無需額外縮放
+        # 直接使用計算的梯度
+        u_x_phys = u_x
+        u_y_phys = u_y
+        v_x_phys = v_x
+        v_y_phys = v_y
+        p_x_phys = p_x
+        p_y_phys = p_y
         
-        # 應用座標變換修正
-        u_x_phys = coord_scale_1st * u_x
-        u_y_phys = coord_scale_1st * u_y
-        v_x_phys = coord_scale_1st * v_x
-        v_y_phys = coord_scale_1st * v_y
-        p_x_phys = coord_scale_1st * p_x
-        p_y_phys = coord_scale_1st * p_y
-        
-        u_xx_phys = coord_scale_2nd * u_xx
-        u_yy_phys = coord_scale_2nd * u_yy
-        v_xx_phys = coord_scale_2nd * v_xx
-        v_yy_phys = coord_scale_2nd * v_yy
+        u_xx_phys = u_xx
+        u_yy_phys = u_yy
+        v_xx_phys = v_xx
+        v_yy_phys = v_yy
 
         # NS equations - 使用物理座標的導數
         vis_total = (1.0/self.Re + self.vis_t)
@@ -938,7 +971,7 @@ class PysicsInformedNeuralNetwork:
         return eq1, eq2, eq3, residual
 
     def _compute_nu_e(self, e_raw: torch.Tensor) -> torch.Tensor:
-        """Compute nonnegative EVM contribution before scaling/capping.""""
+        """Compute nonnegative EVM contribution before scaling/capping."""
         return torch.abs(e_raw)
 
     def compute_gradients_batch(self, outputs: List[torch.Tensor], inputs: List[torch.Tensor]) -> List[List[torch.Tensor]]:
@@ -1005,7 +1038,7 @@ class PysicsInformedNeuralNetwork:
             
             # 在GPU上計算minimum
             vis_t0_tensor = torch.full_like(vis_t_minus_batch, self.vis_t0)
-            beta_cap = torch.full_like(vis_t_minus_batch, (float(self.beta) / float(self.Re)) if self.beta is not None else (self.vis_t0)
+            beta_cap = torch.full_like(vis_t_minus_batch, (float(self.beta) / float(self.Re)) if self.beta is not None else self.vis_t0)
             vis_t = torch.minimum(torch.minimum(vis_t0_tensor, vis_t_minus_batch), beta_cap)
         else:
             # 首次運行或沒有前一步數據
@@ -1099,25 +1132,9 @@ class PysicsInformedNeuralNetwork:
         (self.eq1_pred, self.eq2_pred, self.eq3_pred, self.eq4_pred) = self.neural_net_equations(self.x_f, self.y_f)
     
         if loss_mode == 'MSE':
-            # 距離權重 w(d)：提升靠近邊界點的PDE殘差權重
-            enable_weight = True
-            w_min = 0.2
-            tau = 0.1
-            if hasattr(self, 'config') and hasattr(self.config, 'training'):
-                tr = self.config.training
-                enable_weight = getattr(tr, 'pde_distance_weighting', True)
-                w_min = float(getattr(tr, 'pde_distance_w_min', 0.2))
-                tau = float(getattr(tr, 'pde_distance_tau', 0.1))
-
-            if enable_weight:
-                # d = min(x+1, 1-x, y+1, 1-y) on [-1,1]^2
-                d_x = torch.minimum(self.x_f + 1.0, 1.0 - self.x_f)
-                d_y = torch.minimum(self.y_f + 1.0, 1.0 - self.y_f)
-                d = torch.minimum(d_x, d_y)
-                w = w_min + (1.0 - w_min) * torch.exp(-d / max(tau, 1e-6))
-                # 規模穩定：不對w做梯度，並做均值歸一以保持量級穩定
-                w = (w / (w.mean() + 1e-12)).detach()
-            else:
+            # 使用預計算的距離權重（若有）；否則使用常數1.0
+            w = getattr(self, 'w_f', None)
+            if w is None:
                 w = 1.0
 
             eq1_sq = torch.square(self.eq1_pred.view(-1))
@@ -1806,7 +1823,14 @@ class PysicsInformedNeuralNetwork:
             self.logger.info("=" * 50)
         
         # 時間估算相關變數
-        estimate_frequency = 100  # 每100個epoch計算一次預估時間
+        # 計時同步頻率（減少頻繁同步造成的停頓）
+        timing_sync_interval = 1000
+        try:
+            if hasattr(self, 'config') and hasattr(self.config, 'system'):
+                timing_sync_interval = int(getattr(self.config.system, 'timing_sync_interval', 1000))
+        except Exception:
+            timing_sync_interval = 1000
+        estimate_frequency = max(500, timing_sync_interval)  # 與同步頻率對齊，避免頻繁估算
         
         # 滑窗與步數計數
         if not hasattr(self, 'global_step'):
@@ -1824,12 +1848,12 @@ class PysicsInformedNeuralNetwork:
         for epoch_id in range(start_epoch, num_epoch):
             # 記錄epoch開始時間（僅在需要精確計時時同步GPU）
             if self.rank == 0:
-                # 確定是否需要精確計時
+                # 確定是否需要精確計時（可配置）
                 need_precise_timing = (
-                    epoch_id % 100 == 0 or               # 每100 epochs進行時間預估
+                    epoch_id % timing_sync_interval == 0 or
                     epoch_id == 0 or                     # 首個epoch
                     epoch_id == num_epoch - 1 or         # 最後epoch
-                    (epoch_id + 1) % 1000 == 0           # console輸出時需要精確時間
+                    (epoch_id + 1) % timing_sync_interval == 0
                 )
                 
                 if need_precise_timing and torch.cuda.is_available():
@@ -1930,8 +1954,8 @@ class PysicsInformedNeuralNetwork:
                 active_scheduler.step()
                 new_lr = self.opt.param_groups[0]['lr']
                 
-                # Debug輸出檢查scheduler是否正常工作 (每1000步一次)
-                if self.rank == 0 and epoch_id % 1000 == 0:
+                # Debug輸出檢查scheduler是否正常工作（降頻）
+                if self.rank == 0 and epoch_id % timing_sync_interval == 0:
                     scheduler_name = type(active_scheduler).__name__
                     print(f"🔧 {scheduler_name} step {epoch_id}: lr {old_lr:.6f} -> {new_lr:.6f}")
                 
@@ -2104,8 +2128,8 @@ class PysicsInformedNeuralNetwork:
                 if len(self.epoch_times) > 1000:  # 只保留最近1000個epoch的時間
                     self.epoch_times = self.epoch_times[-500:]  # 刪除一半舊數據，保持高效
                 
-                # 記錄到TensorBoard（修正索引並新增監督損失）
-                if self.tb_writer is not None:
+                # 記錄到TensorBoard（降頻寫入）
+                if self.tb_writer is not None and (epoch_id % max(1, self.tb_interval) == 0 or epoch_id in (0, num_epoch-1)):
                     global_step = self.global_step_offset + epoch_id
                     
                     self.safe_tensorboard_log('Loss/Total', epoch_loss, global_step)
@@ -2132,13 +2156,13 @@ class PysicsInformedNeuralNetwork:
                     self.safe_tensorboard_log('Training/EpochTime', epoch_time, global_step)
                     self.safe_tensorboard_log('Training/Alpha_EVM', self.alpha_evm, global_step)
                     
-                    # GPU記憶體使用
+                    # GPU記憶體使用（降頻）
                     if torch.cuda.is_available():
                         memory_allocated = torch.cuda.memory_allocated(self.device) / 1024**3
                         self.safe_tensorboard_log('System/GPU_Memory_GB', memory_allocated, global_step)
                 
-                # 健康檢查 (初期密集監測 + 定期檢查)
-                if should_monitor:
+                # 健康檢查（降頻）
+                if should_monitor and (epoch_id % (10 * timing_sync_interval) == 0 or epoch_id in (0, num_epoch-1)):
                     self.logger.info(f"🔍 Enhanced Health Check - Epoch {epoch_id}")
                     self.check_tanh_saturation(epoch_id)
 

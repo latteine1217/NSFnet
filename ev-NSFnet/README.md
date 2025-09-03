@@ -19,6 +19,15 @@
 - **記憶體優化**: 自動清理、梯度裁剪、批次自適應
 - **SGDR 排程**: 暖啟動 + 餘弦退火重啟，避免局部最優
 
+## 🆕 最近更新（效能優化）
+
+- PDE 距離權重預計算: 在 `set_eq_training_data()` 預先計算 `w(d)` 並固定（detach），避免每個 epoch 重算 `exp/min/normalize`，降低前向耗時與抖動。
+- TensorBoard 降頻與同步間隔: 新增 `system.tensorboard_interval` 與 `system.timing_sync_interval`，僅在指定間隔執行 TB 寫入與 GPU 同步/時間估算；僅 rank 0 建立 TB writer。
+- DDP broadcast_buffers 可切換: 透過 `system.ddp_broadcast_buffers` 控制 `DDP(..., broadcast_buffers=...)`，預設關閉；在無 BN buffer 的情況下可減少 DDP 同步負擔，對 P100 友善。
+- 降頻日誌: Scheduler 調度訊息、健康檢查、GPU 記憶體 TB 記錄依間隔觸發，避免頻繁 I/O。
+
+推薦預設（P100 ×2）：`tensorboard_interval=1000`、`timing_sync_interval=1000`、`ddp_broadcast_buffers=false`。
+
 ### 🔬 物理精確性
 - **座標系最佳化**: `[-1,1]×[-1,1]` 對稱範圍，提升神經網路學習效率
 - **距離權重**: 自適應 PDE 權重 `w(d)` 強化邊界學習
@@ -200,6 +209,33 @@ PINN.print_optimizer_groups()
 | 遷移部分失敗 | `Optimizer state migrated: X tensors (skipped Y)` | 可忽略，少量 skip 不影響長程收斂 |
 
 ---
+
+### ⚙️ 系統配置（新增參數）
+
+在 `configs/production.yaml` 的 `system` 區塊新增下列鍵值，用於控制寫入/同步頻率與 DDP buffer 同步：
+
+```yaml
+system:
+  tensorboard_enabled: true
+  tensorboard_interval: 1000   # 每隔多少個 epochs 寫一次 TB（降低 I/O）
+  timing_sync_interval: 1000   # GPU 同步與時間估算間隔（降低停頓）
+  ddp_broadcast_buffers: false # 關閉 DDP buffer 同步（無 BN 時建議關閉）
+```
+
+以上參數對數值結果無影響，僅影響訓練端效能與 I/O；可視負載調整（例如 500、2000）。
+
+### 🧮 PDE 距離權重 `w(d)`（預計算）
+
+當 `training.pde_distance_weighting: true` 時，`pinn_solver` 會在設定等式點資料（`set_eq_training_data`）後即在 GPU 上預先計算 `w(d)` 並做均值歸一（detach），訓練過程直接重用 `self.w_f` 以避免每步重算：
+
+```yaml
+training:
+  pde_distance_weighting: true
+  pde_distance_w_min: 0.2
+  pde_distance_tau: 0.2
+```
+
+這項改動對 loss 定義與數值行為保持一致，但可顯著降低每步前向的固定開銷。
 
 ### 🚀 分佈式訓練 (SLURM + torchrun)
 

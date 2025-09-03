@@ -13,8 +13,8 @@ network:
   # 首/末層縮放與EVM激活
   first_layer_scale_main: 1.0   # 啟用LAAF時放緩首層縮放，避免疊加過大
   last_layer_scale_main: 0.5
-  first_layer_scale_evm: 1.2
-  last_layer_scale_evm: 0.2
+  first_layer_scale_evm: 1.0
+  last_layer_scale_evm: 0.5
   evm_output_activation: abs_cap
   # Activations
   activation_main: laaf   # 主網啟用 Layer-wise LAAF
@@ -105,8 +105,11 @@ system:
   device: "auto"
   precision: "float32"
   tensorboard_enabled: true
+  tensorboard_interval: 1000   # 每隔多少個epochs寫入一次TB（降低I/O）
+  timing_sync_interval: 1000   # GPU同步與時間估算間隔（降低頻繁同步）
   log_level: "INFO"
   memory_limit_gb: 14.0
   gradient_clip_norm: 1.0
   memory_cleanup_freq: 100
   epoch_times_limit: 1000
+  ddp_broadcast_buffers: false # 關閉DDP buffer同步以減少開銷（無BN時建議關閉）
