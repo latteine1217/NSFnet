@@ -53,7 +53,7 @@ def test_run(run_dir, output_dir=None):
     epochs_per_stage = 300000  # 可以後續從配置文件讀取
     print(f"Detected Stage: {stage_num}, epochs per stage: {epochs_per_stage}")
     
-    Re = 5000   # Reynolds number (This should ideally be read from checkpoint or config)
+    Re = 3000   # Reynolds number (This should ideally be read from checkpoint or config)
     N_neu = 80
     N_neu_1 = 40
     lam_bcs = 10

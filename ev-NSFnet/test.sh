@@ -31,15 +31,15 @@ echo "======================="
 echo "Test start: $(date)"
 
 # 基於你的實際目錄結構
-BASE_DIR="results/Re5000/result1"
+BASE_DIR="results/Re3000/result2"
 
 # 修正後的Stage參數對應 (根據實際目錄結構)
 declare -A ALPHA_VALUES=(
     [1]="0.05"     # Stage_1
-    [2]="0.03"     # Stage_2  
-    [3]="0.01"     # Stage_3
-    [4]="0.005"    # Stage_4
-    [5]="0.002"    # Stage_5
+    [2]="0.01"     # Stage_2  
+    [3]="0.005"     # Stage_3
+    [4]="0.002"    # Stage_4
+    [5]="0.001"    # Stage_5
 )
 
 # 創建統一的測試結果目錄
