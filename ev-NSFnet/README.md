@@ -19,12 +19,24 @@
 - **記憶體優化**: 自動清理、梯度裁剪、批次自適應
 - **SGDR 排程**: 暖啟動 + 餘弦退火重啟，避免局部最優
 
-## 🆕 最近更新（效能優化）
+## 🆕 最近更新（效能優化與預測模式）
 
+### 🔧 效能優化更新
 - PDE 距離權重預計算: 在 `set_eq_training_data()` 預先計算 `w(d)` 並固定（detach），避免每個 epoch 重算 `exp/min/normalize`，降低前向耗時與抖動。
 - TensorBoard 降頻與同步間隔: 新增 `system.tensorboard_interval` 與 `system.timing_sync_interval`，僅在指定間隔執行 TB 寫入與 GPU 同步/時間估算；僅 rank 0 建立 TB writer。
 - DDP broadcast_buffers 可切換: 透過 `system.ddp_broadcast_buffers` 控制 `DDP(..., broadcast_buffers=...)`，預設關閉；在無 BN buffer 的情況下可減少 DDP 同步負擔，對 P100 友善。
 - 降頻日誌: Scheduler 調度訊息、健康檢查、GPU 記憶體 TB 記錄依間隔觸發，避免頻繁 I/O。
+
+### 📊 TensorBoard 預設值優化
+- **TensorBoard 預設關閉**: 修改 `pinn_solver.py` 中 tensorboard 預設值為 `False`
+- **訓練時啟用**: `production.yaml` 中 `tensorboard_enabled: true` 保持不變
+- **預測時關閉**: `predict.py` 不載入 config，自動使用預設值，純粹執行評估與結果儲存
+- **清潔輸出**: 預測模式不產生 tensorboard 紀錄，聚焦於結果分析
+
+### 🎯 單檔預測功能強化
+- **純預測模式**: `predict.py` 專注於評估和結果儲存，無訓練相關狀態輸出
+- **智能檔名**: 自動使用 checkpoint 中的 epoch 資訊生成結果檔案
+- **靈活輸出**: 支援自定義輸出目錄或自動時間戳命名
 
 推薦預設（P100 ×2）：`tensorboard_interval=1000`、`timing_sync_interval=1000`、`ddp_broadcast_buffers=false`。
 

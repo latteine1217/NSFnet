@@ -145,7 +145,7 @@ class PysicsInformedNeuralNetwork:
         # TensorBoard設定（支援頻率控制與可關閉）
         sys_cfg = getattr(self, 'config', None)
         sys_cfg = getattr(sys_cfg, 'system', None) if sys_cfg is not None else None
-        tb_enabled = bool(getattr(sys_cfg, 'tensorboard_enabled', True)) if sys_cfg is not None else True
+        tb_enabled = bool(getattr(sys_cfg, 'tensorboard_enabled', False)) if sys_cfg is not None else False
         self.tb_interval = int(getattr(sys_cfg, 'tensorboard_interval', 1000)) if sys_cfg is not None else 1000
         if self.rank == 0 and tb_enabled:
             log_dir = f"runs/NSFnet_Re{Re}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"

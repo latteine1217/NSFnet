@@ -66,6 +66,7 @@ system:
   device: "auto"
   precision: "float32"
   tensorboard_enabled: true
+  tensorboard_interval: 1   # 每隔多少個epochs寫入一次TB（降低I/O）
   log_level: "DEBUG"
   memory_limit_gb: 2.0
   gradient_clip_norm: 1.0
