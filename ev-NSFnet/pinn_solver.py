@@ -114,6 +114,11 @@ class PysicsInformedNeuralNetwork:
         self.local_rank = int(os.environ.get('LOCAL_RANK', 0))
         self.world_size = int(os.environ.get('WORLD_SIZE', 1))
 
+        # Persist config ASAP for downstream initialization
+        # 注意：原先 self.config 在 TensorBoard 初始化之後才賦值，導致 tb_enabled 永遠為 False。
+        # 這裡提前保存，確保後續讀取 system.tensorboard_* 設定生效。
+        self.config = config if config is not None else getattr(self, 'config', None)
+
         # Initialize logger ASAP to avoid use-before-init warnings
         self.logger = LoggerFactory.get_logger(
             name=f"PINN_Re{Re}",
@@ -143,8 +148,7 @@ class PysicsInformedNeuralNetwork:
         self.prev_strategy_step = -10**9
 
         # TensorBoard設定（支援頻率控制與可關閉）
-        sys_cfg = getattr(self, 'config', None)
-        sys_cfg = getattr(sys_cfg, 'system', None) if sys_cfg is not None else None
+        sys_cfg = getattr(self.config, 'system', None) if self.config is not None else None
         tb_enabled = bool(getattr(sys_cfg, 'tensorboard_enabled', False)) if sys_cfg is not None else False
         self.tb_interval = int(getattr(sys_cfg, 'tensorboard_interval', 1000)) if sys_cfg is not None else 1000
         if self.rank == 0 and tb_enabled:
@@ -185,8 +189,7 @@ class PysicsInformedNeuralNetwork:
         self.v_sup = None  
         self.p_sup = None
 
-        # Persist config early for post-init scaling, if provided
-        self.config = config if config is not None else getattr(self, 'config', None)
+        # config 已於最前面保存，此處保持原意不再覆寫
 
         # initialize NN
         self.net = self.initialize_NN(
@@ -673,11 +676,11 @@ class PysicsInformedNeuralNetwork:
         return 0.0
 
     def check_tanh_saturation(self, epoch_id):
-        """檢測激活函數飽和情況（tanh 或 LAAF+tnah）使用全域步數串接所有stage。
+        """檢測激活函數飽和情況（tanh 或 LAAF+tnah），固定每10000步檢查一次。
 
         對於 LAAF，飽和條件以 |a * pre| > 2 估算。
         """
-        if epoch_id % 1000 == 0 and self.rank == 0:  # 頻率控制仍沿用呼叫端 + 1000步節流
+        if epoch_id % 10000 == 0 and self.rank == 0:  # 固定 10000 步節流
             # 全域步數（跨 stage 單調遞增）避免TensorBoard覆寫
             global_step = getattr(self, 'global_step_offset', 0) + epoch_id
             saturation_info = []
@@ -2173,9 +2176,9 @@ class PysicsInformedNeuralNetwork:
             if self.rank == 0 and (epoch_id == 0 or (epoch_id + 1) % 1000 == 0 or epoch_id == num_epoch - 1):
                 self.print_log_full_batch_with_time_estimate(epoch_loss, epoch_losses, epoch_id, num_epoch, actual_data_points)
                 
-                # 每1000個epoch輸出健康和記憶體報告
+            # 每10000個epoch輸出健康和記憶體報告
                 
-                # 每1000個epoch檢查tanh飽和度
+                # 每10000個epoch檢查tanh飽和度
                 self.check_tanh_saturation(epoch_id)
 
 
