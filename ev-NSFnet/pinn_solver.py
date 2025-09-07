@@ -948,19 +948,31 @@ class PysicsInformedNeuralNetwork:
         if not getattr(self, 'lock_vis_t_minus', False):
             self.vis_t_minus_gpu = torch.minimum(self.alpha_evm * nu_e_now.detach(), torch.full_like(nu_e_now, cap_val))
 
-        # 定義域已經是 [-1,1]²，梯度即為物理梯度，無需額外縮放
-        # 直接使用計算的梯度
-        u_x_phys = u_x
-        u_y_phys = u_y
-        v_x_phys = v_x
-        v_y_phys = v_y
-        p_x_phys = p_x
-        p_y_phys = p_y
+        # === 坐標縮放修正 ([-1,1] → [0,1]) ===
+        # 若物理域為 [0,1]^2，採樣/訓練域使用線性映射 x_phys = (x_hat + 1)/2。
+        # autograd 得到的是對 x_hat 的導數：
+        #   dx_phys/dx_hat = 1/2  ⇒  du/dx_hat = (1/2) * du/dx_phys ⇒ du/dx_phys = 2 * du/dx_hat
+        #   d^2u/dx_hat^2 = (1/4) * d^2u/dx_phys^2 ⇒ d^2u/dx_phys^2 = 4 * d^2u/dx_hat^2
+        # 因此：一階導數需乘 2；二階導數需乘 4；壓力梯度同理。
+        # 若想關閉此修正（維持舊行為），可在外部設置 self.skip_derivative_rescale = True。
+        if hasattr(self, 'skip_derivative_rescale') and self.skip_derivative_rescale:
+            scale_1 = 1.0
+            scale_2 = 1.0
+        else:
+            scale_1 = 2.0   # 一階導數倍率 (L_hat / L_phys = 2/1)
+            scale_2 = 4.0   # 二階導數倍率 (scale_1^2)
+
+        u_x_phys = scale_1 * u_x
+        u_y_phys = scale_1 * u_y
+        v_x_phys = scale_1 * v_x
+        v_y_phys = scale_1 * v_y
+        p_x_phys = scale_1 * p_x
+        p_y_phys = scale_1 * p_y
         
-        u_xx_phys = u_xx
-        u_yy_phys = u_yy
-        v_xx_phys = v_xx
-        v_yy_phys = v_yy
+        u_xx_phys = scale_2 * u_xx
+        u_yy_phys = scale_2 * u_yy
+        v_xx_phys = scale_2 * v_xx
+        v_yy_phys = scale_2 * v_yy
 
         # NS equations - 使用物理座標的導數
         vis_total = (1.0/self.Re + self.vis_t)
