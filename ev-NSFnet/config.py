@@ -93,7 +93,10 @@ class TrainingConfig:
     
     # L-BFGS配置
     lbfgs: Optional[LBFGSConfig] = None
-    
+    # 新增：EVM 凍結策略與導數縮放配置 (字典形式，保持彈性與向後相容)
+    evm_freeze_control: Optional[Dict[str, Any]] = None  # e.g. {mode: warmup_then_unfreeze, warmup_epochs: 10000, verbose: true}
+    derivative_rescale: Optional[Dict[str, Any]] = None  # e.g. {enable: true, first_order_scale: 2.0, second_order_scale: 4.0}
+
     def __post_init__(self):
         if self.training_stages is None:
             # 默認6階段訓練配置

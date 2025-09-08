@@ -87,6 +87,21 @@ training:
     early_stop_min_delta: 1e-4
     checkpoint_before_lbfgs: true     # L-BFGS前自動保存
 
+  # === EVM 週期凍結/解凍策略（可調整）===
+  evm_freeze_control:
+    mode: periodic            # 目前支援 periodic
+    warmup_epochs: 10000       # 前期只訓練主網（EVM凍結）
+    freeze_len: 5000           # 週期內凍結長度
+    unfreeze_len: 15000        # 週期內解凍長度
+    start_cycle_epoch: 10000   # 從此epoch開始進入週期（預設=warmup_epochs）
+    verbose: true              # 轉換時輸出提示
+
+  # === 導數縮放配置（座標映射修正）===
+  derivative_rescale:
+    enable: true
+    first_order_scale: 2.0     # 一階導數倍率
+    second_order_scale: 4.0    # 二階導數倍率 (預設 = first_order_scale^2)
+
 physics:
   Re: 3000
   alpha_evm: 0.05

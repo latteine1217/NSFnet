@@ -948,19 +948,22 @@ class PysicsInformedNeuralNetwork:
         if not getattr(self, 'lock_vis_t_minus', False):
             self.vis_t_minus_gpu = torch.minimum(self.alpha_evm * nu_e_now.detach(), torch.full_like(nu_e_now, cap_val))
 
-        # === 坐標縮放修正 ([-1,1] → [0,1]) ===
-        # 若物理域為 [0,1]^2，採樣/訓練域使用線性映射 x_phys = (x_hat + 1)/2。
-        # autograd 得到的是對 x_hat 的導數：
-        #   dx_phys/dx_hat = 1/2  ⇒  du/dx_hat = (1/2) * du/dx_phys ⇒ du/dx_phys = 2 * du/dx_hat
-        #   d^2u/dx_hat^2 = (1/4) * d^2u/dx_phys^2 ⇒ d^2u/dx_phys^2 = 4 * d^2u/dx_hat^2
-        # 因此：一階導數需乘 2；二階導數需乘 4；壓力梯度同理。
-        # 若想關閉此修正（維持舊行為），可在外部設置 self.skip_derivative_rescale = True。
-        if hasattr(self, 'skip_derivative_rescale') and self.skip_derivative_rescale:
+        # === 導數縮放 (derivative_rescale 配置驅動) ===
+        # 幾何映射: x_phys = (x_hat + 1)/2 ⇒ du/dx_phys = 2*du/dx_hat, d2u/dx_phys^2 = 4*d2u/dx_hat^2
+        # 配置: training.derivative_rescale {enable, first_order_scale, second_order_scale}
+        # 缺失或 enable=false 時 → (1.0, 1.0)
+        dr_cfg = None
+        try:
+            if hasattr(self, 'config') and hasattr(self.config, 'training'):
+                dr_cfg = getattr(self.config.training, 'derivative_rescale', None)
+        except Exception:
+            dr_cfg = None
+        if isinstance(dr_cfg, dict) and dr_cfg.get('enable', True):
+            scale_1 = float(dr_cfg.get('first_order_scale', 2.0))
+            scale_2 = float(dr_cfg.get('second_order_scale', scale_1 * scale_1))
+        else:
             scale_1 = 1.0
             scale_2 = 1.0
-        else:
-            scale_1 = 2.0   # 一階導數倍率 (L_hat / L_phys = 2/1)
-            scale_2 = 4.0   # 二階導數倍率 (scale_1^2)
 
         u_x_phys = scale_1 * u_x
         u_y_phys = scale_1 * u_y
@@ -1878,11 +1881,11 @@ class PysicsInformedNeuralNetwork:
                         pass
                 self.epoch_start_time = time.time()
             
-            # 修改後的動態凍結邏輯：EVM在epoch 1-9999保持凍結
-            if epoch_id != 0 and epoch_id % 10000 == 0:
-                self.defreeze_evm_net(epoch_id)
-            if epoch_id > 10000 and (epoch_id - 1) % 10000 == 0:
-                self.freeze_evm_net(epoch_id)
+            # === EVM 週期凍結/解凍策略 (config.training.evm_freeze_control) ===
+            try:
+                self._apply_evm_freeze_policy(epoch_id)
+            except Exception:
+                pass
 
             # 清除上一個epoch的梯度
             self.opt.zero_grad(set_to_none=True)
@@ -2206,6 +2209,63 @@ class PysicsInformedNeuralNetwork:
             # 階段結束時的最終清理和統計
 
     
+    def _apply_evm_freeze_policy(self, epoch_id: int):
+        """依配置執行週期性凍結/解凍策略 (periodic)。
+        配置鍵: training.evm_freeze_control
+        - warmup_epochs: 前期全凍結
+        - freeze_len / unfreeze_len: 週期長度
+        - start_cycle_epoch: 進入週期起點 (預設=warmup_epochs)
+        """
+        cfg = getattr(self, 'config', None)
+        if cfg is None or not hasattr(cfg, 'training'):
+            return
+        ctrl = getattr(cfg.training, 'evm_freeze_control', None)
+        if not isinstance(ctrl, dict):
+            return
+        mode = str(ctrl.get('mode', 'periodic')).lower()
+        if mode != 'periodic':
+            return
+        warmup = int(ctrl.get('warmup_epochs', 0))
+        freeze_len = int(ctrl.get('freeze_len', 0))
+        unfreeze_len = int(ctrl.get('unfreeze_len', 0))
+        start_cycle = int(ctrl.get('start_cycle_epoch', warmup))
+        verbose = bool(ctrl.get('verbose', False))
+        if epoch_id < warmup:
+            # 保持凍結
+            if not getattr(self, '_evm_frozen', False):
+                self.freeze_evm_net(epoch_id)
+                self._evm_frozen = True
+            return
+        if epoch_id < start_cycle:
+            # 仍在 warmup 延伸區
+            if not getattr(self, '_evm_frozen', False):
+                self.freeze_evm_net(epoch_id)
+                self._evm_frozen = True
+            return
+        # 進入週期
+        cycle_total = max(freeze_len + unfreeze_len, 1)
+        rel_epoch = (epoch_id - start_cycle) % cycle_total
+        in_freeze_phase = rel_epoch < freeze_len
+        want_frozen = in_freeze_phase
+        cur_frozen = getattr(self, '_evm_frozen', False)
+        if want_frozen and not cur_frozen:
+            self.freeze_evm_net(epoch_id)
+            self._evm_frozen = True
+            if verbose and self.rank == 0:
+                print(f"[EVM Policy] epoch={epoch_id} → FREEZE (cycle rel={rel_epoch}/{cycle_total})")
+        elif (not want_frozen) and cur_frozen:
+            self.defreeze_evm_net(epoch_id)
+            self._evm_frozen = False
+            if verbose and self.rank == 0:
+                print(f"[EVM Policy] epoch={epoch_id} → UNFREEZE (cycle rel={rel_epoch}/{cycle_total})")
+        # TensorBoard 標記
+        if self.tb_writer is not None:
+            try:
+                global_step = getattr(self, 'global_step_offset', 0) + epoch_id
+                self.safe_tensorboard_log('Training/EVM_Frozen', 1.0 if getattr(self, '_evm_frozen', False) else 0.0, global_step)
+            except Exception:
+                pass
+
     def freeze_evm_net(self, epoch_id):
         """
         凍結EVM網路參數 - 保持scheduler連續性
