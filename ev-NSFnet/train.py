@@ -186,7 +186,8 @@ def main():
             path=path,
             N_f=config.training.N_f,
             N_b=1000,
-            sort_by_boundary_distance=getattr(config.training, 'sort_by_boundary_distance', True)
+            sort_by_boundary_distance=getattr(config.training, 'sort_by_boundary_distance', True),
+            derivative_rescale_config=getattr(config.training, 'derivative_rescale', None)
         )
 
         # Set boundary data, | u, v, x, y

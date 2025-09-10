@@ -28,20 +28,38 @@ import torch
 import os
 
 
-def normalize_coordinates(x, y, from_range=(0, 1), to_range=(-1, 1)):
+def normalize_coordinates(x, y, from_range=(0, 1), to_range=(-1, 1), derivative_rescale_config=None):
     """
     統一座標變換函數：將座標從一個範圍轉換到另一個範圍
+    支持導數縮放配置檢查和提示
     
     Args:
         x, y: 輸入座標 (numpy array 或 tensor)
         from_range: 原始範圍 tuple (min, max)
         to_range: 目標範圍 tuple (min, max) 
+        derivative_rescale_config: 導數縮放配置字典 (可選)
         
     Returns:
         x_norm, y_norm: 變換後的座標
     """
     from_min, from_max = from_range
     to_min, to_max = to_range
+    
+    # 計算縮放因子
+    scale_factor = (to_max - to_min) / (from_max - from_min)
+    
+    # 檢查導數縮放配置
+    if derivative_rescale_config is not None and isinstance(derivative_rescale_config, dict):
+        is_enabled = derivative_rescale_config.get('enable', False)
+        first_order_scale = derivative_rescale_config.get('first_order_scale', 1.0)
+        second_order_scale = derivative_rescale_config.get('second_order_scale', 4.0)
+        
+        if is_enabled:
+            print(f"🔄 導數縮放已啟用: 座標縮放因子={scale_factor:.2f}")
+            print(f"   一階導數縮放: {first_order_scale:.1f}x")  
+            print(f"   二階導數縮放: {second_order_scale:.1f}x")
+        else:
+            print(f"⚪ 導數縮放已關閉: 使用標準座標變換 (縮放因子={scale_factor:.2f})")
     
     # 標準化到 [0,1]
     x_norm = (x - from_min) / (from_max - from_min)

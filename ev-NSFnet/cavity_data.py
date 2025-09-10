@@ -21,11 +21,12 @@ from tools import normalize_coordinates, LHSample, sort_pts
 
 
 class DataLoader:
-    def __init__(self, path=None, N_f=20000, N_b=1000, sort_by_boundary_distance: bool = True):
+    def __init__(self, path=None, N_f=20000, N_b=1000, sort_by_boundary_distance: bool = True, derivative_rescale_config=None):
 
         '''
         N_f: Num of residual points
         N_b: Num of boundary points
+        derivative_rescale_config: 導數縮放配置字典 (可選)
         '''
         self.N_b = N_b
         self.x_min = -1.0
@@ -35,6 +36,7 @@ class DataLoader:
         self.N_f = N_f # equation points
         self.pts_bc = None
         self.sort_by_boundary_distance = sort_by_boundary_distance
+        self.derivative_rescale_config = derivative_rescale_config
 
     def loading_boundary_data(self):
         # boundary points
@@ -103,7 +105,8 @@ class DataLoader:
         p = data['P_ref']
         
         # 座標變換: [0,1] → [-1,1]
-        x, y = normalize_coordinates(x, y, from_range=(0, 1), to_range=(-1, 1))
+        x, y = normalize_coordinates(x, y, from_range=(0, 1), to_range=(-1, 1), 
+                                   derivative_rescale_config=self.derivative_rescale_config)
         
         x_star = x.reshape(-1,1)
         y_star = y.reshape(-1,1)
@@ -141,7 +144,8 @@ class DataLoader:
         p = data['P_ref']
         
         # 座標變換: [0,1] → [-1,1]
-        x, y = normalize_coordinates(x, y, from_range=(0, 1), to_range=(-1, 1))
+        x, y = normalize_coordinates(x, y, from_range=(0, 1), to_range=(-1, 1), 
+                                   derivative_rescale_config=self.derivative_rescale_config)
         
         # 展平数据
         x_flat = x.reshape(-1)

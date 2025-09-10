@@ -24,6 +24,13 @@ class NetworkConfig:
     first_layer_scale_evm: float = 1.2
     last_layer_scale_evm: float = 0.1
     evm_output_activation: str = "softplus_cap"  # 可選：softplus_cap | abs_cap
+    # Weight initialization (新增)
+    weight_init_main: str = "xavier_uniform"     # 可選：xavier_uniform|xavier_normal|kaiming_uniform|kaiming_normal|original
+    weight_init_evm: str = "xavier_uniform"
+    weight_init_gain_main: float = 1.0            # gain 乘於對應初始化的計算結果
+    weight_init_gain_evm: float = 1.0
+    bias_init_main: str = "zeros"                # 可選：zeros|ones|keep
+    bias_init_evm: str = "zeros"
     # Activation settings
     activation_main: str = "tanh"      # 可選：tanh | laaf
     activation_evm: str = "tanh"       # 可選：tanh | laaf

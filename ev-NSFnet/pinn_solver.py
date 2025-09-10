@@ -129,6 +129,25 @@ class PysicsInformedNeuralNetwork:
         # 使用統一設備管理函數
         self.device = setup_device(self.local_rank, self.logger)
 
+        # === EVM 輸出激活選擇（abs_cap | softplus_cap）===
+        # 僅負責生成非負輸出，不在此處做上限裁切；裁切維持後續 vis_t 流程
+        self.evm_activation = 'abs_cap'
+        try:
+            ncfg = getattr(self.config, 'network', None)
+            if ncfg and getattr(ncfg, 'evm_output_activation', None):
+                act = str(ncfg.evm_output_activation).strip().lower()
+                if act in ('abs_cap', 'softplus_cap'):
+                    self.evm_activation = act
+                else:
+                    if self.rank == 0:
+                        self.logger.warning(f"Unsupported evm_output_activation={act}, fallback to abs_cap")
+        except Exception:
+            pass
+        if self.evm_activation == 'softplus_cap':
+            self._softplus = torch.nn.Softplus(beta=1.0, threshold=20.0)
+        if self.rank == 0:
+            self.logger.info(f"[EVM] activation={self.evm_activation}")
+
         self.evm = None
         self.Re = Re
         self.vis_t0 = 20.0/self.Re
@@ -197,8 +216,13 @@ class PysicsInformedNeuralNetwork:
         self.net_1 = self.initialize_NN(
                 num_ins=num_ins, num_outs=num_outs_1, num_layers=layers_1, hidden_size=hidden_size_1, is_evm=True).to(self.device)
 
+        # ================= Weight Initialization (config-driven) =================
+        try:
+            self.apply_weight_initialization()
+        except Exception as _e_init:
+            if self.rank == 0:
+                self.logger.warning(f"Weight initialization failed, fallback to default Xavier: {_e_init}")
         
-
         # 確保所有張量使用 float32 精度
         self.net = self.net.float()
         self.net_1 = self.net_1.float()
@@ -254,6 +278,66 @@ class PysicsInformedNeuralNetwork:
         self.logger.system_info(config_info)
 
     # ========= Config-driven setup helpers =========
+    def apply_weight_initialization(self) -> None:
+        """根據 config.network 的 weight_init_* 參數對主網與EVM網路重新初始化權重/偏置。
+        執行順序：FCNet 內部預設 Xavier → 依模式覆寫 → 保留外部首/末層縮放邏輯由 apply_config_post_init 後續處理。
+        original 模式：沿用現有 FCNet 預設 (已是 Xavier uniform for tanh)，僅可選套用 gain 與 bias 初始化。
+        """
+        cfg = getattr(self, 'config', None)
+        if cfg is None or not hasattr(cfg, 'network'):
+            return
+        ncfg = cfg.network
+        main_model = self.get_model(self.net)
+        evm_model = self.get_model(self.net_1)
+
+        def _init_module(module: torch.nn.Module, mode: str, gain: float, bias_mode: str):
+            import torch.nn.init as init
+            if not isinstance(module, torch.nn.Linear):
+                return
+            m = mode.lower()
+            # 決定 base gain（針對 tanh）
+            base_gain = 1.0
+            try:
+                base_gain = torch.nn.init.calculate_gain('tanh')
+            except Exception:
+                base_gain = 1.0
+            final_gain = base_gain * float(gain)
+            try:
+                if m == 'xavier_uniform':
+                    init.xavier_uniform_(module.weight, gain=final_gain)
+                elif m == 'xavier_normal':
+                    init.xavier_normal_(module.weight, gain=final_gain)
+                elif m == 'kaiming_uniform':
+                    init.kaiming_uniform_(module.weight, nonlinearity='tanh')
+                elif m == 'kaiming_normal':
+                    init.kaiming_normal_(module.weight, nonlinearity='tanh')
+                elif m == 'original':
+                    # FCNet 內部已做 Xavier_uniform_ → 僅可選再乘 gain
+                    module.weight.data.mul_(float(gain))
+                else:
+                    init.xavier_uniform_(module.weight, gain=final_gain)
+                # bias
+                bmode = bias_mode.lower()
+                if bmode == 'zeros':
+                    init.zeros_(module.bias)
+                elif bmode == 'ones':
+                    init.ones_(module.bias)
+                # keep: 不變
+            except Exception as e:
+                if self.rank == 0:
+                    self.logger.warning(f"Layer init fallback (mode={mode}): {e}")
+        
+        # 主網
+        for layer in main_model.modules():
+            _init_module(layer, getattr(ncfg, 'weight_init_main', 'xavier_uniform'), getattr(ncfg, 'weight_init_gain_main', 1.0), getattr(ncfg, 'bias_init_main', 'zeros'))
+        # EVM
+        for layer in evm_model.modules():
+            _init_module(layer, getattr(ncfg, 'weight_init_evm', 'xavier_uniform'), getattr(ncfg, 'weight_init_gain_evm', 1.0), getattr(ncfg, 'bias_init_evm', 'zeros'))
+        if self.rank == 0:
+            self.logger.info(
+                f"[Init] main={getattr(ncfg,'weight_init_main','xavier_uniform')} gain={getattr(ncfg,'weight_init_gain_main',1.0)} | "
+                f"evm={getattr(ncfg,'weight_init_evm','xavier_uniform')} gain={getattr(ncfg,'weight_init_gain_evm',1.0)}")
+
     def _apply_layer_scales(self, model: torch.nn.Module, first_scale: float, last_scale: float) -> None:
         """Apply scaling to the first and last Linear layers' weights.
 
@@ -989,7 +1073,14 @@ class PysicsInformedNeuralNetwork:
         return eq1, eq2, eq3, residual
 
     def _compute_nu_e(self, e_raw: torch.Tensor) -> torch.Tensor:
-        """Compute nonnegative EVM contribution before scaling/capping."""
+        """Compute nonnegative EVM contribution before scaling/capping.
+        - abs_cap: 直接取絕對值
+        - softplus_cap: 使用 softplus 平滑避免梯度在0處不連續
+        僅保證非負，最終上限裁切仍在 vis_t 流程中處理。
+        """
+        if self.evm_activation == 'softplus_cap':
+            return self._softplus(e_raw)
+        # default / abs_cap
         return torch.abs(e_raw)
 
     def compute_gradients_batch(self, outputs: List[torch.Tensor], inputs: List[torch.Tensor]) -> List[List[torch.Tensor]]:
