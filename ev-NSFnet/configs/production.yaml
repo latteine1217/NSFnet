@@ -17,14 +17,14 @@ network:
   last_layer_scale_evm: 1.0
   evm_output_activation: abs_cap
   # Weight init (新增)
-  weight_init_main: xavier_uniform
-  weight_init_evm: xavier_uniform
+  weight_init_main: kaiming_uniform # (kaiming_uniform / xavier_uniform)
+  weight_init_evm: kaiming_uniform
   weight_init_gain_main: 1.0
   weight_init_gain_evm: 1.0
   bias_init_main: zeros
   bias_init_evm: zeros
   # Activations
-  activation_main: tanh   # 主網啟用 Layer-wise LAAF
+  activation_main: tanh   # 是否啟用 Layer-wise LAAF (tanh / laaf)
   activation_evm: tanh    # EVM 保持 tanh
   laaf_init_scale: 1.0    # a 初始值
   laaf_max_scale: 20.0    # a 上限，避免暴衝
@@ -37,7 +37,7 @@ training:
   log_tips: true               # 啟用訓練提示
   # 採樣排序與PDE距離權重
   sort_by_boundary_distance: false   # 已在loss引入距離權重，預設關閉排序以節省前處理
-  pde_distance_weighting: true       # 啟用PDE距離權重 w(d)
+  pde_distance_weighting: false       # 啟用PDE距離權重 w(d)
   pde_distance_w_min: 0.8            # 權重下限，避免遠區為0
   pde_distance_tau: 0.2              # 距離尺度 (越小越聚焦邊界)
   training_stages:
@@ -47,7 +47,7 @@ training:
     - [0.005, 200000, 1e-5, Constant]           # Stage 4
     - [0.002, 300000, 2e-6, Constant]           # Stage 5
   # Per-Stage AdamW weight decay (length must equal stages)
-  weight_decay_stages: [1.0e-5, 5.0e-6, 5.0e-6, 2.0e-6, 0.0]
+  weight_decay_stages: [0.0, 0.0, 0.0, 0.0, 0.0]
 
   # SGDR scheduler parameters (optional)
   sgdr:
@@ -98,14 +98,14 @@ training:
   evm_freeze_control:
     mode: periodic            # 目前支援 periodic
     warmup_epochs: 10000       # 前期只訓練主網（EVM凍結）
-    freeze_len: 9990           # 週期內凍結長度
-    unfreeze_len: 10        # 週期內解凍長度
+    freeze_len: 9999           # 週期內凍結長度
+    unfreeze_len: 1        # 週期內解凍長度
     start_cycle_epoch: 10000   # 從此epoch開始進入週期（預設=warmup_epochs）
     verbose: true              # 轉換時輸出提示
 
   # === 導數縮放配置（座標映射修正）===
   derivative_rescale:
-    enable: true
+    enable: false
     first_order_scale: 2.0     # 一階導數倍率
     second_order_scale: 4.0    # 二階導數倍率 (預設 = first_order_scale^2)
 
@@ -117,7 +117,7 @@ physics:
   eq_weight: 1.0
 
 supervision:
-  enabled: true
+  enabled: false
   data_points: 1  # 数据监督点数量，0表示不使用监督数据
   data_path: "data/cavity_Re3000_256_Uniform.mat"
   weight: 5.0     # 监督数据权重

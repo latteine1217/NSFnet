@@ -29,9 +29,9 @@ class DataLoader:
         derivative_rescale_config: 導數縮放配置字典 (可選)
         '''
         self.N_b = N_b
-        self.x_min = -1.0
+        self.x_min = 0.0
         self.x_max = 1.0
-        self.y_min = -1.0
+        self.y_min = 0.0
         self.y_max = 1.0
         self.N_f = N_f # equation points
         self.pts_bc = None
@@ -43,10 +43,10 @@ class DataLoader:
         Nx = 513
         Ny = 513
         dx = 1.0/(Nx-1)
-        r_const = 5
+        r_const = 10
 
         upper_x = np.linspace(self.x_min, self.x_max, num=Nx)
-        u_upper = 1 -  np.cosh(r_const*(upper_x-0.0)) / np.cosh(r_const*1.0)
+        u_upper = 1 -  np.cosh(r_const*(upper_x-0.5)) / np.cosh(r_const*0.5)
         #  lower upper left right
         x_b = np.concatenate([np.linspace(self.x_min, self.x_max, num=Nx),
                               np.linspace(self.x_min, self.x_max, num=Nx),
@@ -105,8 +105,8 @@ class DataLoader:
         p = data['P_ref']
         
         # 座標變換: [0,1] → [-1,1]
-        x, y = normalize_coordinates(x, y, from_range=(0, 1), to_range=(-1, 1), 
-                                   derivative_rescale_config=self.derivative_rescale_config)
+        #x, y = normalize_coordinates(x, y, from_range=(0, 1), to_range=(-1, 1), 
+        #                           derivative_rescale_config=self.derivative_rescale_config)
         
         x_star = x.reshape(-1,1)
         y_star = y.reshape(-1,1)
@@ -144,8 +144,8 @@ class DataLoader:
         p = data['P_ref']
         
         # 座標變換: [0,1] → [-1,1]
-        x, y = normalize_coordinates(x, y, from_range=(0, 1), to_range=(-1, 1), 
-                                   derivative_rescale_config=self.derivative_rescale_config)
+        #x, y = normalize_coordinates(x, y, from_range=(0, 1), to_range=(-1, 1), 
+        #                           derivative_rescale_config=self.derivative_rescale_config)
         
         # 展平数据
         x_flat = x.reshape(-1)
