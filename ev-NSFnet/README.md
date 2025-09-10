@@ -36,6 +36,18 @@ python train.py --config configs/production.yaml --dry-run
 python test.py
 python predict.py --checkpoint path/to/checkpoint.pth --output_dir results/predict_run
 ```
+
+舊版檔案轉換（.pth + .pth_evm → 統一 checkpoint）：
+```bash
+python pinn_modules/convert_legacy_checkpoints.py \
+  --input_dir results/Re5000/4x120_Nf200k_lamB10_alpha0.05 \
+  --output_dir results/converted/Re5000/4x120_Nf200k_lamB10_alpha0.05 \
+  --re 5000 --alpha_evm 0.05
+
+# 轉換後可直接用 test.py 掃描：
+python test.py --run_dir results/converted/Re5000/4x120_Nf200k_lamB10_alpha0.05 \
+               --output_dir results/test_results/my_run
+```
 精簡目錄：
 ```
 pinn_modules/   # 管理型模組 (checkpoint / optimizer)
