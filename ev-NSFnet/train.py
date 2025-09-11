@@ -118,7 +118,7 @@ def main():
     training_data = dataloader.loading_training_data()
     PINN.set_eq_training_data(X=training_data)
 
-    eval_file = f'./NSFnet/ev-NSFnet/data/cavity_Re{cfg.physics.Re}_256_Uniform.mat'
+    eval_file = f'./data/cavity_Re{cfg.physics.Re}_256_Uniform.mat'
     x_star, y_star, u_star, v_star, p_star = dataloader.loading_evaluate_data(eval_file)
 
     total_epochs = sum(st.epochs for st in stages)
