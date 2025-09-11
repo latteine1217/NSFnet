@@ -1,0 +1,21 @@
+experiment_name: NSFnet_Restore
+description: Restored baseline with modern style logging
+physics:
+  Re: 5000
+  alpha_evm: 0.05
+  bc_weight: 10
+  eq_weight: 1
+network:
+  layers: 6
+  layers_1: 4
+  hidden_size: 80
+  hidden_size_1: 40
+training:
+  N_f: 120000
+  training_stages:
+    - {alpha: 0.05, epochs: 500000, lr: 1.0e-3, name: "Stage 1"}
+    - {alpha: 0.03, epochs: 500000, lr: 2.0e-4, name: "Stage 2"}
+    - {alpha: 0.01, epochs: 500000, lr: 4.0e-5, name: "Stage 3"}
+    - {alpha: 0.005, epochs: 500000, lr: 1.0e-5, name: "Stage 4"}
+    - {alpha: 0.002, epochs: 500000, lr: 2.0e-6, name: "Stage 5"}
+    - {alpha: 0.002, epochs: 500000, lr: 2.0e-6, name: "Stage 6"}
