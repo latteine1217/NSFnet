@@ -579,7 +579,7 @@ class PysicsInformedNeuralNetwork:
             p_pred = p_pred.reshape(257,257)
             e_pred = e_pred.reshape(257,257)
 
-            scipy.io.savemat('./NSFnet/ev-NSFnet/results/Re5000/test_result/cavity_result_loop_%d.mat'%(loop),
+            scipy.io.savemat('./results/Re5000/test_result/cavity_result_loop_%d.mat'%(loop),
                         {'U_pred':u_pred,
                          'V_pred':v_pred,
                          'P_pred':p_pred,
