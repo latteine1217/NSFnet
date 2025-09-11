@@ -20,6 +20,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import scipy.io
 import numpy as np
+import time
 from net import FCNet
 from typing import Dict, List, Set, Optional, Union, Callable
 
@@ -303,6 +304,17 @@ class PysicsInformedNeuralNetwork:
         return self.solve_Adam(self.fwd_computing_loss_2d, num_epoch, batchsize, scheduler)
 
     def solve_Adam(self, loss_func, num_epoch=1000, batchsize=None, scheduler=None):
+        # 記錄階段與累積起始時間（每個 stage 呼叫一次）
+        if not hasattr(self, 'cumulative_start_time'):
+            self.cumulative_start_time = time.time()
+        self._epoch_start_wall = time.time()  # stage 起始
+        self._last_log_time = self._epoch_start_wall
+        self._last_log_epoch = 0
+        # 若外部未設置，提供回退值
+        if not hasattr(self, 'log_interval'):
+            self.log_interval = 100
+        if not hasattr(self, 'progress_bar_width'):
+            self.progress_bar_width = 30
         self.freeze_evm_net(0)
         
         for epoch_id in range(num_epoch):
@@ -319,17 +331,15 @@ class PysicsInformedNeuralNetwork:
             self.opt.zero_grad()
             loss.backward()
             
-            # 同步梯度 (DDP 會自動處理)
-            # 注意：DDP已經自動處理梯度同步，不需要手動 all_reduce
-            
             # 更新參數
             self.opt.step()
             
             if scheduler:
                 scheduler.step()
 
-            # 只在rank 0打印和保存
-            if self.rank == 0 and (epoch_id == 0 or (epoch_id + 1) % 100 == 0):
+            # 只在 rank 0 打印與保存
+            interval = self.log_interval if self.log_interval > 0 else 100
+            if self.rank == 0 and (epoch_id == 0 or (epoch_id + 1) % interval == 0 or epoch_id == num_epoch - 1):
                 self.print_log(loss, losses, epoch_id, num_epoch)
 
             if self.rank == 0 and (epoch_id == 0 or epoch_id % 10000 == 0):
@@ -364,24 +374,122 @@ class PysicsInformedNeuralNetwork:
                 )
 
     def print_log(self, loss, losses, epoch_id, num_epoch):
+        # 多行輸出：進度條 / 損失細節 / 時間與GPU / 物理量
         def get_lr(optimizer):
             for param_group in optimizer.param_groups:
                 return param_group['lr']
+        now = time.time()
+        if not hasattr(self, '_epoch_start_wall'):
+            self._epoch_start_wall = now
+        if not hasattr(self, 'cumulative_start_time'):
+            self.cumulative_start_time = self._epoch_start_wall
+        if not hasattr(self, '_last_log_time'):
+            self._last_log_time = self._epoch_start_wall
+        if not hasattr(self, '_last_log_epoch'):
+            self._last_log_epoch = 0
 
-        print("current lr is {}".format(get_lr(self.opt)))
-        if isinstance(losses[0], int):
-            eq_loss = losses[0]
+        # 時間統計
+        stage_elapsed = now - self._epoch_start_wall
+        total_elapsed = now - self.cumulative_start_time
+        avg_it_s = (epoch_id + 1) / stage_elapsed if stage_elapsed > 0 else 0.0
+        interval_epochs = (epoch_id - self._last_log_epoch) if (epoch_id - self._last_log_epoch) > 0 else 1
+        interval_time = now - self._last_log_time
+        interval_it_s = interval_epochs / interval_time if interval_time > 0 else 0.0
+        remain = num_epoch - (epoch_id + 1)
+        eta_sec = remain / avg_it_s if avg_it_s > 0 else float('inf')
+
+        # vis_t 與等效 Re (保持現有公式)
+        if self.vis_t is not None:
+            vis_t_mean = self.vis_t.detach().mean().item()
+            Re_eff = 1.0 / (1.0 / self.Re + vis_t_mean)
         else:
-            eq_loss = losses[0].detach().cpu().item()
+            vis_t_mean = float('nan')
+            Re_eff = float('nan')
 
-        print("epoch/num_epoch: ", epoch_id + 1, "/", num_epoch,
-              "loss[Adam]: %.3e"
-              %(loss.detach().cpu().item()),
-              "eq1_loss: %.3e " %(self.loss_eq1.detach().cpu().item()),
-              "eq2_loss: %.3e " %(self.loss_eq2.detach().cpu().item()),
-              "eq3_loss: %.3e " %(self.loss_eq3.detach().cpu().item()),
-              "eq4_loss: %.3e " %(self.loss_eq4.detach().cpu().item()),
-              "bc_loss: %.3e" %(losses[1].detach().cpu().item()))
+        lr = get_lr(self.opt)
+        # 損失
+        loss_total = loss.detach().cpu().item()
+        eq1 = self.loss_eq1.detach().cpu().item()
+        eq2 = self.loss_eq2.detach().cpu().item()
+        eq3 = self.loss_eq3.detach().cpu().item()
+        eq4 = self.loss_eq4.detach().cpu().item()
+        bc_loss = losses[1].detach().cpu().item()
+
+        # 進度條
+        width = getattr(self, 'progress_bar_width', 30)
+        progress = (epoch_id + 1) / num_epoch
+        filled = int(progress * width)
+        bar = '█' * filled + ' ' * (width - filled)
+
+        def fmt_t(sec):
+            if sec == float('inf'):
+                return 'INF'
+            if sec < 60:
+                return f"{sec:.1f}s"
+            m, s = divmod(sec, 60)
+            if m < 60:
+                return f"{int(m)}m{s:04.1f}s"
+            h, m = divmod(m, 60)
+            return f"{int(h)}h{int(m)}m"
+
+        # GPU 記憶體
+        try:
+            mem_alloc = torch.cuda.memory_allocated(self.device) / 1024**2
+            mem_reserved = torch.cuda.memory_reserved(self.device) / 1024**2
+            mem_total = torch.cuda.get_device_properties(self.device).total_memory / 1024**2
+        except Exception:
+            mem_alloc = mem_reserved = mem_total = float('nan')
+
+        # 每區間 throughput（點/秒）: 邊界點 + 方程點 (單GPU當前區塊)
+        try:
+            pts = 0
+            if hasattr(self, 'x_f'):
+                pts += self.x_f.shape[0]
+            if hasattr(self, 'x_b'):
+                pts += self.x_b.shape[0]
+            # interval throughput 以 interval_it_s (epochs/sec) * pts (每 epoch 處理點) 計
+            throughput = interval_it_s * pts
+        except Exception:
+            throughput = float('nan')
+
+        # 放大因子 (保持目前公式: 未定義 -> 省略, 可後續加入)
+        amplification = 'N/A'
+
+        header = f"[{self.current_stage}] {epoch_id+1:>7d}/{num_epoch:<7d} {progress*100:6.2f}% |{bar}|"
+        line_loss = (f"  損失: total={loss_total:.3e}  方程總={self.loss_e.detach().cpu().item():.3e}  邊界={bc_loss:.3e}\n"
+                     f"        eq1={eq1:.2e} eq2={eq2:.2e} eq3={eq3:.2e} eq4(熵殘差)={eq4:.2e}")
+        line_time = (f"  時間: 本階段={fmt_t(stage_elapsed)}  平均/epoch={stage_elapsed/(epoch_id+1):.2f}s  interval_it/s={interval_it_s:.2f}  平均it/s={avg_it_s:.2f}\n"
+                     f"        剩餘預估={fmt_t(eta_sec)}  累積總時長={fmt_t(total_elapsed)}")
+        line_gpu = (f"  GPU : mem={mem_alloc:.1f}MB/{mem_total:.0f}MB (res {mem_reserved:.1f}MB)  throughput={throughput:.1f} pts/s  lr={lr:.2e}")
+        line_phys = (f"  物理: 目標Re={self.Re}  Re_eff={Re_eff:.1f}  alpha_evm={self.alpha_evm}  放大因子={amplification}")
+
+        print(header)
+        print(line_loss)
+        print(line_time)
+        print(line_gpu)
+        print(line_phys)
+        print('-'*100)
+
+        # 更新區間狀態
+        self._last_log_time = now
+        self._last_log_epoch = epoch_id
+
+    def get_runtime_stats(self, epoch_id: int, num_epoch: int):
+        """回傳當前訓練速度與等效 Re 統計，供外部擴充使用。"""
+        now = time.time()
+        if not hasattr(self, '_epoch_start_wall'):
+            return {}
+        elapsed = now - self._epoch_start_wall
+        avg_it_s = (epoch_id + 1) / elapsed if elapsed > 0 else 0.0
+        remain = num_epoch - (epoch_id + 1)
+        eta_sec = remain / avg_it_s if avg_it_s > 0 else float('inf')
+        if self.vis_t is not None:
+            vis_t_mean = self.vis_t.detach().mean().item()
+            Re_eff = 1.0 / (1.0 / self.Re + vis_t_mean)
+        else:
+            vis_t_mean = float('nan'); Re_eff = float('nan')
+        return dict(avg_it_s=avg_it_s, eta_seconds=eta_sec, vis_t_mean=vis_t_mean, Re_eff=Re_eff)
+
 
     def evaluate(self, x, y, u, v, p):
         """ testing all points in the domain """
