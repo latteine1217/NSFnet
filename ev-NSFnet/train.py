@@ -108,6 +108,20 @@ def main():
     PINN.log_interval = cfg.training.log_interval
     PINN.progress_bar_width = 30
 
+    # TensorBoard (only rank 0)
+    tb_writer = None
+    if rank == 0 and getattr(cfg.training, 'enable_tensorboard', False):
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+            run_name = f"{cfg.experiment_name}_{time.strftime('%Y%m%d_%H%M%S')}"
+            log_dir = os.path.join(cfg.training.tb_log_dir, run_name)
+            os.makedirs(log_dir, exist_ok=True)
+            tb_writer = SummaryWriter(log_dir=log_dir)
+            PINN.tb_writer = tb_writer
+            logger.info(f"TensorBoard 啟用: {log_dir}")
+        except Exception as e:
+            logger.warning(f"TensorBoard 初始化失敗: {e}")
+
     # 數據載入 (保持舊版語意: datasets/)
     path = './datasets/'
     dataloader = cavity.DataLoader(path=path, N_f=cfg.training.N_f, N_b=1000)
@@ -143,6 +157,12 @@ def main():
     finally:
         cleanup_distributed()
         if rank == 0:
+            if 'tb_writer' in locals() and tb_writer is not None:
+                try:
+                    tb_writer.close()
+                    logger.info('TensorBoard 已關閉')
+                except Exception:
+                    pass
             logger.close()
 
 

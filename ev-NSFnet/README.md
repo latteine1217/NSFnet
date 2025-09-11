@@ -67,6 +67,32 @@ python train.py --config configs/production.yaml
 可用參數：
 - `--dry-run`：僅列印配置與 stages，不執行訓練。
 
+### 🧵 分散式與單 GPU
+- 本專案已加入「條件式 DDP 包裝」：只有在 `torch.distributed` 已初始化且 `WORLD_SIZE>1` 時才會以 `DistributedDataParallel` 包裹網路。
+- 單 GPU / 未啟動 `torchrun` 直接呼叫 `train.py` 或 `test.py` 不會再觸發 `Default process group has not been initialized` 錯誤。
+
+分散式訓練示例 (4 GPUs)：
+```bash
+torchrun --nproc_per_node=4 train.py --config configs/production.yaml
+```
+(或使用 `python -m torch.distributed.run --nproc_per_node=4 ...`)
+
+### 🔍 模型評估 / 批次推論
+`test.py` 會依序載入各階段 / 迭代檢查點執行 `evaluate()` 與 `test()`：
+```bash
+python test.py
+```
+- 若未啟動分散式，程式會自動設置 `RANK=0, WORLD_SIZE=1`。
+- 需要先確保對應 `./results/Re5000/.../model_cavity_loop*.pth` 檔案存在。
+- 產出結果 `.mat` 於 `./NSFnet/ev-NSFnet/results/Re5000/test_result/`。
+
+### ❗ 常見問題
+| 問題 | 排查 | 解法 |
+|------|------|------|
+| 找不到 checkpoint | 路徑字串與 Stage 名稱不符 | 確認目錄層級與 `alpha_evm` 值 | 
+| 單 GPU 仍報 DDP 初始化錯 | 早期舊版本 `pinn_solver.py` | 重新更新至本版 / 清除舊快取 |
+| CUDA OOM | `N_f` 過大 | 降低 `N_f` 或縮小 hidden size |
+
 ---
 ## ⚙️ 主要程式檔案
 | 檔案 | 說明 |

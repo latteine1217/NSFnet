@@ -41,7 +41,7 @@ class DataLoader:
         Nx = 513
         Ny = 513
         dx = 1.0/(Nx-1)
-        r_const = 50
+        r_const = 10
 
         upper_x = np.linspace(self.x_min, self.x_max, num=Nx)
         u_upper = 1 -  np.cosh(r_const*(upper_x-0.5)) / np.cosh(r_const*0.5)

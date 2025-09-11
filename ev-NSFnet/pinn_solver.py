@@ -25,6 +25,9 @@ from net import FCNet
 from typing import Dict, List, Set, Optional, Union, Callable
 
 class PysicsInformedNeuralNetwork:
+    # TensorBoard: 外部可注入 writer (rank0)，未注入則不記錄
+    tb_writer = None
+    global_step = 0
     # Initialize the class
     def __init__(self,
                  opt=None,
@@ -87,21 +90,25 @@ class PysicsInformedNeuralNetwork:
         self.net_1 = self.initialize_NN(
                 num_ins=num_ins, num_outs=num_outs_1, num_layers=layers_1, hidden_size=hidden_size_1).to(self.device)
 
-        # Wrap models with DDP
-        self.net = DDP(self.net, device_ids=[self.local_rank], output_device=self.local_rank)
-        self.net_1 = DDP(self.net_1, device_ids=[self.local_rank], output_device=self.local_rank)
+        # Conditionally wrap with DDP only when distributed is initialized
+        self.is_distributed = dist.is_available() and dist.is_initialized() and self.world_size > 1
+        if self.is_distributed:
+            self.net = DDP(self.net, device_ids=[self.local_rank], output_device=self.local_rank)
+            self.net_1 = DDP(self.net_1, device_ids=[self.local_rank], output_device=self.local_rank)
 
         if net_params:
             if self.rank == 0:
                 print(f"Loading net params from {net_params}")
             load_params = torch.load(net_params, map_location=self.device)
-            self.net.module.load_state_dict(load_params)
+            target_net = self.net.module if self.is_distributed else self.net
+            target_net.load_state_dict(load_params)
 
         if net_params_1:
             if self.rank == 0:
                 print(f"Loading net_1 params from {net_params_1}")
             load_params_1 = torch.load(net_params_1, map_location=self.device)
-            self.net_1.module.load_state_dict(load_params_1)
+            target_net1 = self.net_1.module if self.is_distributed else self.net_1
+            target_net1.load_state_dict(load_params_1)
 
         # 初始化 vis_t 相關變數
         self.vis_t = None
@@ -317,7 +324,10 @@ class PysicsInformedNeuralNetwork:
             self.progress_bar_width = 30
         self.freeze_evm_net(0)
         
+        if not hasattr(self, 'global_step'):
+            self.global_step = 0
         for epoch_id in range(num_epoch):
+            self.global_step += 1
             # train evm net every 10000 step
             if epoch_id != 0 and epoch_id % 10000 == 0:
                 self.defreeze_evm_net(epoch_id)
@@ -470,6 +480,25 @@ class PysicsInformedNeuralNetwork:
         print(line_phys)
         print('-'*100)
 
+        # TensorBoard 紀錄
+        if hasattr(self, 'tb_writer') and self.tb_writer is not None:
+            try:
+                self.tb_writer.add_scalar('loss/total', loss_total, self.global_step)
+                self.tb_writer.add_scalar('loss/boundary', bc_loss, self.global_step)
+                self.tb_writer.add_scalar('loss/eq_total', self.loss_e.detach().cpu().item(), self.global_step)
+                self.tb_writer.add_scalar('loss/eq1', eq1, self.global_step)
+                self.tb_writer.add_scalar('loss/eq2', eq2, self.global_step)
+                self.tb_writer.add_scalar('loss/eq3', eq3, self.global_step)
+                self.tb_writer.add_scalar('loss/eq4_entropy', eq4, self.global_step)
+                self.tb_writer.add_scalar('physics/Re_eff', Re_eff, self.global_step)
+                self.tb_writer.add_scalar('physics/alpha_evm', self.alpha_evm, self.global_step)
+                self.tb_writer.add_scalar('perf/throughput_pts_per_s', throughput, self.global_step)
+                self.tb_writer.add_scalar('perf/avg_iter_s', avg_it_s, self.global_step)
+                self.tb_writer.add_scalar('perf/interval_iter_s', interval_it_s, self.global_step)
+                self.tb_writer.add_scalar('lr', lr, self.global_step)
+            except Exception:
+                pass
+
         # 更新區間狀態
         self._last_log_time = now
         self._last_log_epoch = epoch_id
@@ -574,9 +603,11 @@ class PysicsInformedNeuralNetwork:
         if not os.path.exists(save_results_to):
             os.makedirs(save_results_to)
 
-        # Save model state dict without DDP wrapper
-        torch.save(self.net.module.state_dict(), save_results_to+filename)
-        torch.save(self.net_1.module.state_dict(), save_results_to+filename+'_evm')
+        # Save model state dict (unwrap if DDP)
+        net_to_save = self.net.module if self.is_distributed else self.net
+        net1_to_save = self.net_1.module if self.is_distributed else self.net_1
+        torch.save(net_to_save.state_dict(), save_results_to+filename)
+        torch.save(net1_to_save.state_dict(), save_results_to+filename+'_evm')
 
     def divergence(self, x_star, y_star):
         (self.eq1_pred, self.eq2_pred,

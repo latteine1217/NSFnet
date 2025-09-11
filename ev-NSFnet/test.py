@@ -15,6 +15,7 @@
 # Author: Zhicheng Wang, Hui Xiang
 # Created: 08.03.2023
 import torch
+import os
 from train import setup_distributed, cleanup_distributed
 from tools import *
 import cavity_data as cavity
@@ -22,8 +23,9 @@ import pinn_solver as psolver
 import csv
 
 
+
 def train(net_params=None, net_params_1=None, loop = 0, loss_record=None):
-    Re = 3000   # Reynolds number
+    Re = 5000   # Reynolds number
     N_neu = 80
     N_neu_1 = 40
     lam_bcs = 10
@@ -50,7 +52,7 @@ def train(net_params=None, net_params_1=None, loop = 0, loss_record=None):
     path = './NSFnet/datasets/'
     dataloader = cavity.DataLoader(path=path, N_f=N_f, N_b=1000)
 
-    filename = './NSFnet/ev-NSFnet/data/cavity_Re'+str(Re)+'_256_Uniform.mat'
+    filename = './data/cavity_Re'+str(Re)+'_256_Uniform.mat'
     x_star, y_star, u_star, v_star, p_star = dataloader.loading_evaluate_data(filename)
 
     # Evaluating

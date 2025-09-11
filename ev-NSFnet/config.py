@@ -31,6 +31,8 @@ class TrainingStage:
 class TrainingConfig:
     N_f: int = 120000
     log_interval: int = 1000  # epoch interval for logging
+    enable_tensorboard: bool = True  # toggle TensorBoard logging
+    tb_log_dir: str = 'runs'  # base directory for tensorboard logs
     training_stages: List[TrainingStage] = field(default_factory=lambda: [
         TrainingStage(0.05, 500000, 1e-3,  "Stage 1"),
         TrainingStage(0.03, 500000, 2e-4,  "Stage 2"),
@@ -72,6 +74,12 @@ class ConfigManager:
             tr = data['training']
             if 'N_f' in tr:
                 cfg.training.N_f = int(tr['N_f'])
+            if 'log_interval' in tr:
+                cfg.training.log_interval = int(tr['log_interval'])
+            if 'enable_tensorboard' in tr:
+                cfg.training.enable_tensorboard = bool(tr['enable_tensorboard'])
+            if 'tb_log_dir' in tr:
+                cfg.training.tb_log_dir = str(tr['tb_log_dir'])
             if 'training_stages' in tr:
                 stages = []
                 for st in tr['training_stages']:
@@ -110,6 +118,7 @@ class ConfigManager:
         print(f"  Stages={len(c.training.training_stages)}")
         for i, st in enumerate(c.training.training_stages, 1):
             print(f"    - {i}: {st.name} | alpha={st.alpha} | epochs={st.epochs:,} | lr={st.lr:.2e}")
+        print(f"  TensorBoard={'ON' if c.training.enable_tensorboard else 'OFF'} dir={c.training.tb_log_dir}")
         print("="*60)
 
     def validate_config(self):
