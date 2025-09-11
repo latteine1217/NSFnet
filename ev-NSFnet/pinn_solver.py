@@ -579,7 +579,10 @@ class PysicsInformedNeuralNetwork:
             p_pred = p_pred.reshape(257,257)
             e_pred = e_pred.reshape(257,257)
 
-            scipy.io.savemat('./results/Re5000/test_result/cavity_result_loop_%d.mat'%(loop),
+            save_dir = './results/Re5000/test_result'
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir, exist_ok=True)
+            scipy.io.savemat(os.path.join(save_dir, f'cavity_result_loop_{loop}.mat'),
                         {'U_pred':u_pred,
                          'V_pred':v_pred,
                          'P_pred':p_pred,
