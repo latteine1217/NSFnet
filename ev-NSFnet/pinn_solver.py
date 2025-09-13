@@ -22,6 +22,7 @@ import scipy.io
 import numpy as np
 import time
 from net import FCNet
+from training_enhancer import DNSDataEnhancer
 from typing import Dict, List, Set, Optional, Union, Callable
 
 class PysicsInformedNeuralNetwork:
@@ -51,7 +52,20 @@ class PysicsInformedNeuralNetwork:
                  net_params=None,
                  net_params_1=None,
                  checkpoint_freq=2000,
-                 checkpoint_path='./checkpoint/'):
+                 checkpoint_path='./checkpoint/',
+                 # 坐標歸一化
+                 normalize_coordinates=False,
+                 # 新增參數
+                 enable_distance_weighting=False,
+                 distance_weight_function='inverse',
+                 enable_point_sorting=False,
+                 sort_method='distance_to_boundary',
+                 enable_dns_enhancement=False,
+                 dns_points_count=1000,
+                 # PDE 距離權重（參考 ev-NSFnet copy）
+                 pde_distance_weighting=False,
+                 pde_distance_w_min=0.8,
+                 pde_distance_tau=0.2):
 
         # Initialize distributed training
         self.rank = int(os.environ.get('RANK', 0))
@@ -59,8 +73,15 @@ class PysicsInformedNeuralNetwork:
         self.world_size = int(os.environ.get('WORLD_SIZE', 1))
 
         # Set device for current process
-        self.device = torch.device(f'cuda:{self.local_rank}')
-        torch.cuda.set_device(self.local_rank)
+        if torch.cuda.is_available():
+            self.device = torch.device(f'cuda:{self.local_rank}')
+            try:
+                torch.cuda.set_device(self.local_rank)
+            except (AttributeError, RuntimeError):
+                # Fallback for compatibility
+                self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device('cpu')
 
         self.evm = None
         self.Re = Re
@@ -83,6 +104,8 @@ class PysicsInformedNeuralNetwork:
         self.alpha_o = outlet_weight
         self.alpha_s = supervised_data_weight
         self.loss_i = self.loss_o = self.loss_b = self.loss_e = self.loss_s = 0.0
+        # 座標歸一化設定
+        self.normalize_coordinates = bool(normalize_coordinates)
 
         # initialize NN
         self.net = self.initialize_NN(
@@ -113,6 +136,23 @@ class PysicsInformedNeuralNetwork:
         # 初始化 vis_t 相關變數
         self.vis_t = None
         self.vis_t_minus = None
+
+        # 初始化（移除 TrainingEnhancer；僅保留 DNS 增強）
+        self.enable_distance_weighting = enable_distance_weighting  # deprecated, not used
+        self.enable_point_sorting = enable_point_sorting            # deprecated, not used
+        self.enable_dns_enhancement = enable_dns_enhancement
+        
+        if self.enable_dns_enhancement:
+            self.dns_enhancer = DNSDataEnhancer(device=self.device)
+            self.dns_points_count = dns_points_count
+            self.dns_data = None  # 將在set_dns_data中設置
+            self.dns_loss_weight = supervised_data_weight
+
+        # PDE 距離權重設定（鏡像 ev-NSFnet copy），預設關閉
+        self.pde_distance_weighting = bool(pde_distance_weighting)
+        self.pde_distance_w_min = float(pde_distance_w_min)
+        self.pde_distance_tau = float(pde_distance_tau)
+        self.w_f = None
 
         self.opt = torch.optim.Adam(
             list(self.net.parameters())+list(self.net_1.parameters()),
@@ -163,6 +203,26 @@ class PysicsInformedNeuralNetwork:
         if time:
             self.t_f = torch.tensor(X[2][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
 
+        # 點排序由 DataLoader 控制；此處不再排序
+
+        # 預計算 PDE 距離權重（若啟用），使用解析的邊界距離（避免 cdist 計算開銷）
+        try:
+            if self.pde_distance_weighting and isinstance(self.x_f, torch.Tensor) and isinstance(self.y_f, torch.Tensor):
+                with torch.no_grad():
+                    # 計算到邊界的最小距離（域為 [0,1]^2）
+                    d_x = torch.minimum(self.x_f, 1.0 - self.x_f)
+                    d_y = torch.minimum(self.y_f, 1.0 - self.y_f)
+                    d = torch.minimum(d_x, d_y)
+                    w = self.pde_distance_w_min + (1.0 - self.pde_distance_w_min) * torch.exp(-d / max(self.pde_distance_tau, 1e-6))
+                    w = (w / (w.mean() + 1e-12)).detach()
+                self.w_f = w
+            else:
+                self.w_f = None
+        except Exception:
+            self.w_f = None
+
+        # 舊版的距離權重（透過 TrainingEnhancer）已移除
+
         if self.rank == 0:
             print(f"GPU {self.rank}: Processing {end_idx - start_idx} equation points out of {total_points} total")
 
@@ -189,7 +249,19 @@ class PysicsInformedNeuralNetwork:
         self.train_data_func = train_data_func
 
     def neural_net_u(self, x, y):
-        X = torch.cat((x, y), dim=1)
+        # 確保輸入張量有正確的形狀
+        if x.dim() == 1:
+            x = x.view(-1, 1)
+        if y.dim() == 1:
+            y = y.view(-1, 1)
+            
+        # 視設定決定是否將座標線性映射到 [-1, 1]（不覆蓋原始座標，保持鏈式法則於方程處正確）
+        if self.normalize_coordinates:
+            x_in = 2.0 * x - 1.0
+            y_in = 2.0 * y - 1.0
+        else:
+            x_in, y_in = x, y
+        X = torch.cat((x_in, y_in), dim=1)
         uvp = self.net(X)
         ee = self.net_1(X)
         u = uvp[:, 0]
@@ -199,7 +271,19 @@ class PysicsInformedNeuralNetwork:
         return u, v, p, e
 
     def neural_net_equations(self, x, y):
-        X = torch.cat((x, y), dim=1)
+        # 確保輸入張量有正確的形狀
+        if x.dim() == 1:
+            x = x.view(-1, 1)
+        if y.dim() == 1:
+            y = y.view(-1, 1)
+            
+        # 視設定決定是否將座標線性映射到 [-1, 1]；保持 x,y 為原始物理座標以正確計算偏導
+        if self.normalize_coordinates:
+            x_in = 2.0 * x - 1.0
+            y_in = 2.0 * y - 1.0
+        else:
+            x_in, y_in = x, y
+        X = torch.cat((x_in, y_in), dim=1)
         uvp = self.net(X)
         ee = self.net_1(X)
 
@@ -271,8 +355,9 @@ class PysicsInformedNeuralNetwork:
 
         # BC loss
         if loss_mode == 'MSE':
-                self.loss_b = torch.mean(torch.square(self.u_b.reshape([-1]) - self.u_pred_b.reshape([-1]))) + \
-                                torch.mean(torch.square(self.v_b.reshape([-1]) - self.v_pred_b.reshape([-1])))
+                u_loss = torch.square(self.u_b.reshape([-1]) - self.u_pred_b.reshape([-1]))
+                v_loss = torch.square(self.v_b.reshape([-1]) - self.v_pred_b.reshape([-1]))
+                self.loss_b = torch.mean(u_loss) + torch.mean(v_loss)
 
         # equation
         assert self.x_f is not None and self.y_f is not None
@@ -280,11 +365,32 @@ class PysicsInformedNeuralNetwork:
         (self.eq1_pred, self.eq2_pred, self.eq3_pred, self.eq4_pred) = self.neural_net_equations(self.x_f, self.y_f)
     
         if loss_mode == 'MSE':
-                self.loss_eq1 = torch.mean(torch.square(self.eq1_pred.reshape([-1])))
-                self.loss_eq2 = torch.mean(torch.square(self.eq2_pred.reshape([-1])))
-                self.loss_eq3 = torch.mean(torch.square(self.eq3_pred.reshape([-1])))
-                self.loss_eq4 = torch.mean(torch.square(self.eq4_pred.reshape([-1])))
+                eq1_loss = torch.square(self.eq1_pred.reshape([-1]))
+                eq2_loss = torch.square(self.eq2_pred.reshape([-1]))
+                eq3_loss = torch.square(self.eq3_pred.reshape([-1]))
+                eq4_loss = torch.square(self.eq4_pred.reshape([-1]))
+                
+                # 應用 PDE 距離權重（若可用）
+                if isinstance(getattr(self, 'w_f', None), torch.Tensor) and self.w_f.shape[0] == eq1_loss.shape[0]:
+                    w = self.w_f.view(-1)
+                    self.loss_eq1 = torch.mean(w * eq1_loss)
+                    self.loss_eq2 = torch.mean(w * eq2_loss)
+                    self.loss_eq3 = torch.mean(w * eq3_loss)
+                    self.loss_eq4 = torch.mean(w * eq4_loss)
+                else:
+                    self.loss_eq1 = torch.mean(eq1_loss)
+                    self.loss_eq2 = torch.mean(eq2_loss)
+                    self.loss_eq3 = torch.mean(eq3_loss)
+                    self.loss_eq4 = torch.mean(eq4_loss)
+                    
                 self.loss_e = self.loss_eq1 + self.loss_eq2 + self.loss_eq3 + 0.1 * self.loss_eq4
+
+        # DNS監督數據損失（如果啟用）
+        if self.enable_dns_enhancement and self.dns_data is not None:
+            dns_loss = self.compute_dns_loss()
+            self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e + self.dns_loss_weight * dns_loss
+        else:
+            self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e
 
         # 跨GPU聚合損失以獲得全局損失值
         if self.world_size > 1:
@@ -295,8 +401,6 @@ class PysicsInformedNeuralNetwork:
                 # 聚合方程損失
                 dist.all_reduce(self.loss_e, op=dist.ReduceOp.SUM)
                 self.loss_e /= self.world_size
-
-        self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e
 
         return self.loss, [self.loss_e, self.loss_b]
 
@@ -617,3 +721,111 @@ class PysicsInformedNeuralNetwork:
          self.eq3_pred, self.eq4_pred) = self.neural_net_equations(x_star, y_star)
         div = self.eq3_pred
         return div
+
+    def set_dns_data(self, dns_points=None, dns_values=None, custom_weights=None):
+        """
+        設置DNS數據用於監督學習
+        
+        Args:
+            dns_points: DNS座標點 [N, 2] 或 None（將生成隨機點）
+            dns_values: DNS對應的物理量值 [N, num_vars]
+            custom_weights: 自定義權重 [N] 或 標量
+        """
+        if not self.enable_dns_enhancement:
+            if self.rank == 0:
+                print("DNS enhancement not enabled. Call with enable_dns_enhancement=True")
+            return
+            
+        if dns_points is None:
+            # 生成隨機座標點
+            dns_points = self.dns_enhancer.generate_random_points(
+                self.dns_points_count,
+                domain_bounds=[(0.0, 1.0), (0.0, 1.0)],
+                distribution='uniform')
+            if self.rank == 0:
+                print(f"Generated {self.dns_points_count} random DNS points")
+        else:
+            dns_points = torch.tensor(dns_points, dtype=torch.float32).to(self.device)
+            
+        if dns_values is None:
+            if self.rank == 0:
+                print("Warning: No DNS values provided. DNS loss will be zero.")
+            dns_values = torch.zeros((dns_points.shape[0], 3), device=self.device)  # u, v, p
+        else:
+            dns_values = torch.tensor(dns_values, dtype=torch.float32).to(self.device)
+            
+        if custom_weights is not None:
+            self.dns_enhancer.set_custom_loss_weights(custom_weights, dns_points.shape[0])
+        else:
+            # 使用預設權重
+            self.dns_enhancer.set_custom_loss_weights(1.0, dns_points.shape[0])
+        
+        self.dns_data = {
+            'points': dns_points,
+            'values': dns_values,
+            'weights': self.dns_enhancer.custom_weights
+        }
+        
+        if self.rank == 0:
+            print(f"DNS data set: {dns_points.shape[0]} points with {dns_values.shape[1]} variables")
+            
+    def compute_dns_loss(self):
+        """
+        計算DNS監督數據損失
+        """
+        if self.dns_data is None:
+            return torch.tensor(0.0, device=self.device)
+            
+        dns_points = self.dns_data['points']
+        dns_values = self.dns_data['values']  # [N, num_vars] 假設包含 u, v, p
+        dns_weights = self.dns_data['weights']
+        
+        # 拆分座標
+        x_dns = dns_points[:, 0:1]
+        y_dns = dns_points[:, 1:2]
+        
+        # 預測值
+        u_pred, v_pred, p_pred, _ = self.neural_net_u(x_dns, y_dns)
+        
+        # 計算各項損失
+        u_dns_loss = torch.square(dns_values[:, 0] - u_pred.reshape(-1))
+        v_dns_loss = torch.square(dns_values[:, 1] - v_pred.reshape(-1))
+        
+        if dns_values.shape[1] > 2:  # 包含壓力
+            p_dns_loss = torch.square(dns_values[:, 2] - p_pred.reshape(-1))
+            total_dns_loss = u_dns_loss + v_dns_loss + p_dns_loss
+        else:
+            total_dns_loss = u_dns_loss + v_dns_loss
+        
+        # 應用權重
+        weighted_dns_loss = total_dns_loss * dns_weights
+        
+        return torch.mean(weighted_dns_loss)
+        
+    def update_dns_weights(self, new_weights):
+        """
+        更新DNS數據權重
+        
+        Args:
+            new_weights: 新權重值
+        """
+        if self.dns_data is not None:
+            self.dns_enhancer.set_custom_loss_weights(new_weights, len(self.dns_data['points']))
+            self.dns_data['weights'] = self.dns_enhancer.custom_weights
+            if self.rank == 0:
+                print(f"DNS weights updated. Mean weight: {torch.mean(self.dns_data['weights']):.4f}")
+        
+    def get_training_enhancement_stats(self):
+        """
+        獲取訓練增強統計資訊
+        """
+        stats = {}
+
+        if self.enable_dns_enhancement and self.dns_data is not None:
+            stats['dns_data'] = {
+                'num_points': len(self.dns_data['points']),
+                'mean_weight': float(torch.mean(self.dns_data['weights'])),
+                'loss_weight_factor': float(self.dns_loss_weight)
+            }
+            
+        return stats

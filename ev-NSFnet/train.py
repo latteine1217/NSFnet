@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 import time
 import cavity_data as cavity
+import numpy as np
 import pinn_solver as psolver
 from config import ConfigManager
 from logger import get_logger
@@ -55,6 +56,11 @@ def print_stage_table(stages, logger):
 
 
 def build_pinn(cfg):
+    # 將 supervision 權重傳遞到 solver（僅在啟用 supervision 時有效）
+    sup_enabled = getattr(cfg, 'supervision', None) is not None and cfg.supervision.enabled
+    supervised_data_weight = cfg.supervision.weight if sup_enabled else 1.0
+    enable_dns_enhancement = bool(sup_enabled)
+
     return psolver.PysicsInformedNeuralNetwork(
         Re=cfg.physics.Re,
         layers=cfg.network.layers,
@@ -65,7 +71,17 @@ def build_pinn(cfg):
         alpha_evm=cfg.physics.alpha_evm,
         bc_weight=cfg.physics.bc_weight,
         eq_weight=cfg.physics.eq_weight,
-        checkpoint_path='./checkpoint/'
+        checkpoint_path='./checkpoint/',
+        # coordinates normalization
+        normalize_coordinates=cfg.training.normalize_coordinates,
+        # supervision / DNS 增強
+        enable_dns_enhancement=enable_dns_enhancement,
+        dns_points_count=(cfg.supervision.data_points if sup_enabled else 0),
+        supervised_data_weight=supervised_data_weight,
+        # PDE 距離權重（鏡像 ev-NSFnet copy）
+        pde_distance_weighting=cfg.training.pde_distance_weighting,
+        pde_distance_w_min=cfg.training.pde_distance_w_min,
+        pde_distance_tau=cfg.training.pde_distance_tau,
     )
 
 
@@ -124,7 +140,12 @@ def main():
 
     # 數據載入 (保持舊版語意: datasets/)
     path = './datasets/'
-    dataloader = cavity.DataLoader(path=path, N_f=cfg.training.N_f, N_b=1000)
+    dataloader = cavity.DataLoader(
+        path=path,
+        N_f=cfg.training.N_f,
+        N_b=1000,
+        sort_by_boundary_distance=cfg.training.sort_by_boundary_distance,
+    )
 
     # 邊界 / 方程點
     boundary_data = dataloader.loading_boundary_data()
@@ -134,6 +155,22 @@ def main():
 
     eval_file = f'./data/cavity_Re{cfg.physics.Re}_256_Uniform.mat'
     x_star, y_star, u_star, v_star, p_star = dataloader.loading_evaluate_data(eval_file)
+
+    # 監督數據（DNS）載入與設置
+    if cfg.supervision.enabled and cfg.supervision.data_points > 0:
+        if rank == 0:
+            logger.info(f"載入監督數據: {cfg.supervision.data_points} 點，來源: {cfg.supervision.data_path}")
+        x_sup, y_sup, u_sup, v_sup, p_sup = dataloader.loading_supervision_data(
+            cfg.supervision.data_path, cfg.supervision.data_points, cfg.supervision.random_seed
+        )
+        if x_sup.shape[0] > 0:
+            # 組裝為 set_dns_data 所需格式
+            dns_points = np.hstack([x_sup, y_sup])
+            dns_values = np.hstack([u_sup, v_sup, p_sup])
+            # 使用預設每點權重=1，由 supervised_data_weight 控制整體權重
+            PINN.set_dns_data(dns_points=dns_points, dns_values=dns_values, custom_weights=None)
+            if rank == 0:
+                logger.info("監督數據設置完成（DNS loss 已啟用）")
 
     total_epochs = sum(st.epochs for st in stages)
     if rank == 0:

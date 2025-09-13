@@ -12,6 +12,12 @@ network:
   hidden_size_1: 40
 training:
   N_f: 120000
+  sort_by_boundary_distance: false  # 依照 ev-NSFnet copy 的預設，關閉排序
+  normalize_coordinates: false      # 是否將 (x,y) 正規化到 [-1, 1]
+  # PDE distance weighting (mirror ev-NSFnet copy)
+  pde_distance_weighting: false
+  pde_distance_w_min: 0.8
+  pde_distance_tau: 0.2
   training_stages:
     - {alpha: 0.05, epochs: 500000, lr: 1.0e-3, name: "Stage 1"}
     - {alpha: 0.03, epochs: 500000, lr: 2.0e-4, name: "Stage 2"}
@@ -19,3 +25,11 @@ training:
     - {alpha: 0.005, epochs: 500000, lr: 1.0e-5, name: "Stage 4"}
     - {alpha: 0.002, epochs: 500000, lr: 2.0e-6, name: "Stage 5"}
     - {alpha: 0.002, epochs: 500000, lr: 2.0e-6, name: "Stage 6"}
+
+# Supervision / DNS data settings (optional)
+supervision:
+  enabled: false                # 設為 true 以啟用監督點
+  data_points: 0                # 監督點數量（>0 生效）
+  data_path: data/cavity_Re5000_256_Uniform.mat  # 監督來源 .mat 檔
+  weight: 2.0                   # DNS 監督損失整體權重
+  random_seed: 42               # 固定抽樣隨機種子

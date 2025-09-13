@@ -67,6 +67,15 @@ python train.py --config configs/production.yaml
 可用參數：
 - `--dry-run`：僅列印配置與 stages，不執行訓練。
 
+配置重點（節選）：
+- `training.normalize_coordinates`：是否將輸入座標 `(x,y)` 線性映射至 `[-1, 1]` 再送入網路。預設 `false`。
+
+### 🧭 座標歸一化（可選）
+- 切換位置：`configs/production.yaml` → `training.normalize_coordinates: true|false`
+- 作用說明：將資料域 [0,1]^2 的 `(x,y)` 線性映射為 `[-1,1]^2` 後再餵入網路；有助於網路在早期更穩定地收斂。
+- 方程一致性：歸一化是線性變換，PyTorch autograd 會自動套用鏈式法則，不需額外修改 PDE 殘差中的一階/二階導數計算。
+- 預設值：`false`（關閉）。如需開啟，請將其設為 `true` 並重新訓練。
+
 ### 🧵 分散式與單 GPU
 - 本專案已加入「條件式 DDP 包裝」：只有在 `torch.distributed` 已初始化且 `WORLD_SIZE>1` 時才會以 `DistributedDataParallel` 包裹網路。
 - 單 GPU / 未啟動 `torchrun` 直接呼叫 `train.py` 或 `test.py` 不會再觸發 `Default process group has not been initialized` 錯誤。
