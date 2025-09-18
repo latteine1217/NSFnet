@@ -130,3 +130,5 @@ Thumbs.db
 
 *.out
 *.err
+
+/ev-NSFnet\ copy

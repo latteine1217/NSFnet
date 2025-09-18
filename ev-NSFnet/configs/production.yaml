@@ -12,6 +12,12 @@ network:
   hidden_size_1: 40
 training:
   N_f: 120000
+  sort_training_points: true
+  sdf_weighting:
+    enabled: false
+    min_weight: 0.2
+    decay: 5.0
+  coordinate_transform: true
   training_stages:
     - {alpha: 0.05, epochs: 500000, lr: 1.0e-3, name: "Stage 1"}
     - {alpha: 0.03, epochs: 500000, lr: 2.0e-4, name: "Stage 2"}
@@ -19,3 +25,7 @@ training:
     - {alpha: 0.005, epochs: 500000, lr: 1.0e-5, name: "Stage 4"}
     - {alpha: 0.002, epochs: 500000, lr: 2.0e-6, name: "Stage 5"}
     - {alpha: 0.002, epochs: 500000, lr: 2.0e-6, name: "Stage 6"}
+supervision:
+  enabled: false
+  num_samples: 0
+  loss_weight: 1.0

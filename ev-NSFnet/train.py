@@ -5,6 +5,7 @@ import argparse
 import torch
 import torch.distributed as dist
 import time
+import numpy as np
 import cavity_data as cavity
 import pinn_solver as psolver
 from config import ConfigManager
@@ -65,6 +66,7 @@ def build_pinn(cfg):
         alpha_evm=cfg.physics.alpha_evm,
         bc_weight=cfg.physics.bc_weight,
         eq_weight=cfg.physics.eq_weight,
+        supervised_data_weight=cfg.supervision.loss_weight if cfg.supervision.enabled else 0.0,
         checkpoint_path='./checkpoint/'
     )
 
@@ -124,16 +126,68 @@ def main():
 
     # 數據載入 (保持舊版語意: datasets/)
     path = './datasets/'
-    dataloader = cavity.DataLoader(path=path, N_f=cfg.training.N_f, N_b=1000)
+    dataloader = cavity.DataLoader(
+        path=path,
+        N_f=cfg.training.N_f,
+        N_b=1000,
+        sort_training_points=cfg.training.sort_training_points,
+        sdf_weighting=cfg.training.sdf_weighting,
+        coord_transform=cfg.training.coordinate_transform,
+    )
 
     # 邊界 / 方程點
     boundary_data = dataloader.loading_boundary_data()
     PINN.set_boundary_data(X=boundary_data)
     training_data = dataloader.loading_training_data()
-    PINN.set_eq_training_data(X=training_data)
+    sdf_weights = dataloader.get_sdf_weights()
+    PINN.set_coordinate_transform(dataloader.get_coord_scale())
+    PINN.set_eq_training_data(X=training_data, weights=sdf_weights)
+    if sdf_weights is not None and cfg.training.sdf_weighting.enabled and rank == 0:
+        logger.info(
+            f"SDF weighting 啟用: min={float(np.min(sdf_weights)):.3f} "
+            f"max={float(np.max(sdf_weights)):.3f} decay={cfg.training.sdf_weighting.decay}"
+        )
 
     eval_file = f'./data/cavity_Re{cfg.physics.Re}_256_Uniform.mat'
     x_star, y_star, u_star, v_star, p_star = dataloader.loading_evaluate_data(eval_file)
+
+    supervision_cfg = getattr(cfg, 'supervision', None)
+    if supervision_cfg and supervision_cfg.enabled and supervision_cfg.num_samples > 0:
+        available = x_star.shape[0]
+        samples = min(int(supervision_cfg.num_samples), available)
+        if samples <= 0:
+            PINN.clear_supervised_data()
+            PINN.set_supervised_loss_weight(0.0)
+            if rank == 0:
+                logger.warning('Supervision 已啟用但 num_samples <= 0，已停用')
+        else:
+            rng = np.random.default_rng()
+            if PINN.world_size > 1 and dist.is_initialized():
+                if rank == 0:
+                    indices = rng.choice(available, size=samples, replace=False)
+                    idx_tensor = torch.tensor(indices, device=PINN.device, dtype=torch.long)
+                else:
+                    idx_tensor = torch.empty(samples, dtype=torch.long, device=PINN.device)
+                dist.broadcast(idx_tensor, src=0)
+                indices = idx_tensor.cpu().numpy()
+            else:
+                indices = rng.choice(available, size=samples, replace=False)
+            supervised_batch = (
+                x_star[indices],
+                y_star[indices],
+                u_star[indices],
+                v_star[indices],
+                p_star[indices],
+            )
+            PINN.set_supervised_data(supervised_batch)
+            PINN.set_supervised_loss_weight(supervision_cfg.loss_weight)
+            if rank == 0:
+                logger.info(f'Supervision 啟用: samples={samples}, loss_weight={supervision_cfg.loss_weight}')
+    else:
+        PINN.clear_supervised_data()
+        PINN.set_supervised_loss_weight(0.0)
+        if supervision_cfg and supervision_cfg.enabled and rank == 0:
+            logger.warning('Supervision 已啟用但缺少有效樣本設定 (num_samples<=0)，已停用')
 
     total_epochs = sum(st.epochs for st in stages)
     if rank == 0:

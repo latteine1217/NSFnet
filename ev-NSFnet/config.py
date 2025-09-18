@@ -28,11 +28,26 @@ class TrainingStage:
     name: str
 
 @dataclass
+class SupervisionConfig:
+    enabled: bool = False
+    num_samples: int = 0
+    loss_weight: float = 1.0
+
+@dataclass
+class SDFWeightConfig:
+    enabled: bool = False
+    min_weight: float = 0.2
+    decay: float = 5.0
+
+@dataclass
 class TrainingConfig:
     N_f: int = 120000
     log_interval: int = 1000  # epoch interval for logging
     enable_tensorboard: bool = True  # toggle TensorBoard logging
     tb_log_dir: str = 'runs'  # base directory for tensorboard logs
+    sort_training_points: bool = True  # toggle sorting of training points by distance to BCs
+    sdf_weighting: SDFWeightConfig = field(default_factory=SDFWeightConfig)
+    coordinate_transform: bool = False  # toggle mapping [0,1] -> [-1,1]
     training_stages: List[TrainingStage] = field(default_factory=lambda: [
         TrainingStage(0.05, 500000, 1e-3,  "Stage 1"),
         TrainingStage(0.03, 500000, 2e-4,  "Stage 2"),
@@ -46,7 +61,8 @@ class TrainingConfig:
 class AppConfig:
     physics: PhysicsConfig = PhysicsConfig()
     network: NetworkConfig = NetworkConfig()
-    training: TrainingConfig = TrainingConfig()
+    training: TrainingConfig = field(default_factory=TrainingConfig)
+    supervision: SupervisionConfig = SupervisionConfig()
     experiment_name: str = "NSFnet_Restore"
     description: str = "Restored baseline with modern logging"
 
@@ -80,6 +96,20 @@ class ConfigManager:
                 cfg.training.enable_tensorboard = bool(tr['enable_tensorboard'])
             if 'tb_log_dir' in tr:
                 cfg.training.tb_log_dir = str(tr['tb_log_dir'])
+            if 'sort_training_points' in tr:
+                cfg.training.sort_training_points = bool(tr['sort_training_points'])
+            if 'coordinate_transform' in tr:
+                cfg.training.coordinate_transform = bool(tr['coordinate_transform'])
+            if 'sdf_weighting' in tr:
+                sdf = tr['sdf_weighting'] or {}
+                if not isinstance(cfg.training.sdf_weighting, SDFWeightConfig):
+                    cfg.training.sdf_weighting = SDFWeightConfig()
+                if 'enabled' in sdf:
+                    cfg.training.sdf_weighting.enabled = bool(sdf['enabled'])
+                if 'min_weight' in sdf:
+                    cfg.training.sdf_weighting.min_weight = float(sdf['min_weight'])
+                if 'decay' in sdf:
+                    cfg.training.sdf_weighting.decay = float(sdf['decay'])
             if 'training_stages' in tr:
                 stages = []
                 for st in tr['training_stages']:
@@ -95,6 +125,15 @@ class ConfigManager:
                         stages.append(TrainingStage(float(st[0]), int(st[1]), float(st[2]), str(st[3])))
                 if stages:
                     cfg.training.training_stages = stages
+        # supervision
+        if 'supervision' in data:
+            sup = data['supervision'] or {}
+            if 'enabled' in sup:
+                cfg.supervision.enabled = bool(sup['enabled'])
+            if 'num_samples' in sup:
+                cfg.supervision.num_samples = int(sup['num_samples'])
+            if 'loss_weight' in sup:
+                cfg.supervision.loss_weight = float(sup['loss_weight'])
         # meta
         if 'experiment_name' in data:
             cfg.experiment_name = str(data['experiment_name'])
@@ -119,6 +158,15 @@ class ConfigManager:
         for i, st in enumerate(c.training.training_stages, 1):
             print(f"    - {i}: {st.name} | alpha={st.alpha} | epochs={st.epochs:,} | lr={st.lr:.2e}")
         print(f"  TensorBoard={'ON' if c.training.enable_tensorboard else 'OFF'} dir={c.training.tb_log_dir}")
+        print(f"  SortTrainingPoints={'ON' if c.training.sort_training_points else 'OFF'}")
+        sdf = c.training.sdf_weighting
+        sdf_state = 'ON' if getattr(sdf, 'enabled', False) else 'OFF'
+        print(f"  SDFWeighting={sdf_state} min={getattr(sdf, 'min_weight', 'n/a')} decay={getattr(sdf, 'decay', 'n/a')}")
+        print(f"  CoordTransform={'ON' if c.training.coordinate_transform else 'OFF'}")
+        sup = c.supervision
+        print("📊 Supervision:")
+        state = 'ON' if sup.enabled else 'OFF'
+        print(f"  状態={state} num_samples={sup.num_samples} loss_weight={sup.loss_weight}")
         print("="*60)
 
     def validate_config(self):

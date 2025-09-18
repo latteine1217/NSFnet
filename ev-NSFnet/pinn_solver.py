@@ -83,6 +83,15 @@ class PysicsInformedNeuralNetwork:
         self.alpha_o = outlet_weight
         self.alpha_s = supervised_data_weight
         self.loss_i = self.loss_o = self.loss_b = self.loss_e = self.loss_s = 0.0
+        self.x_s = self.y_s = self.u_s = self.v_s = self.p_s = None
+        self._p_mask = None
+        self.supervision_point_count = 0
+        self.supervision_total_points = 0
+        self.supervision_has_data = False
+        self.supervision_enabled = False
+        self.eq_weights = None
+        self.coord_scale = 1.0
+        self.coord_scale_sq = 1.0
 
         # initialize NN
         self.net = self.initialize_NN(
@@ -150,7 +159,8 @@ class PysicsInformedNeuralNetwork:
 
     def set_eq_training_data(self,
                              X=None,
-                             time=False):
+                             time=False,
+                             weights=None):
         # Split equation training data across GPUs
         total_points = X[0].shape[0]
         points_per_gpu = total_points // self.world_size
@@ -162,11 +172,90 @@ class PysicsInformedNeuralNetwork:
         self.y_f = torch.tensor(X[1][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
         if time:
             self.t_f = torch.tensor(X[2][start_idx:end_idx], requires_grad=requires_grad).float().to(self.device)
+        if weights is not None:
+            weights_np = np.asarray(weights)
+            self.eq_weights = torch.tensor(weights_np[start_idx:end_idx], requires_grad=False).float().to(self.device)
+        else:
+            self.eq_weights = None
 
         if self.rank == 0:
             print(f"GPU {self.rank}: Processing {end_idx - start_idx} equation points out of {total_points} total")
 
         self.init_vis_t()
+
+    def set_coordinate_transform(self, scale: float):
+        if scale is None or scale <= 0:
+            self.coord_scale = 1.0
+            self.coord_scale_sq = 1.0
+        else:
+            self.coord_scale = float(scale)
+            self.coord_scale_sq = self.coord_scale ** 2
+
+    def clear_supervised_data(self):
+        self.x_s = self.y_s = self.u_s = self.v_s = self.p_s = None
+        self._p_mask = None
+        self.supervision_point_count = 0
+        self.supervision_total_points = 0
+        self.supervision_has_data = False
+        self.supervision_enabled = False
+
+    def set_supervised_data(self, data):
+        if data is None:
+            self.clear_supervised_data()
+            return
+        x, y, u, v, p = data
+        x = np.asarray(x)
+        y = np.asarray(y)
+        u = np.asarray(u)
+        v = np.asarray(v)
+        p = np.asarray(p) if p is not None else None
+
+        total_points = x.shape[0]
+        self.supervision_total_points = int(total_points)
+        if total_points == 0:
+            self.clear_supervised_data()
+            return
+
+        if self.world_size > 1:
+            idx_splits = np.array_split(np.arange(total_points), self.world_size)
+            local_idx = idx_splits[self.rank]
+        else:
+            local_idx = slice(None)
+
+        def slice_array(arr):
+            if arr is None:
+                return None
+            if isinstance(local_idx, np.ndarray):
+                return arr[local_idx]
+            return arr
+
+        x_local = slice_array(x)
+        y_local = slice_array(y)
+        u_local = slice_array(u)
+        v_local = slice_array(v)
+        p_local = slice_array(p) if p is not None else None
+
+        local_count = x_local.shape[0] if x_local is not None else 0
+        self.supervision_point_count = int(local_count)
+
+        to_tensor = lambda arr: torch.tensor(arr, requires_grad=False).float().to(self.device) if arr is not None else None
+        self.x_s = to_tensor(x_local)
+        self.y_s = to_tensor(y_local)
+        self.u_s = to_tensor(u_local)
+        self.v_s = to_tensor(v_local)
+        self.p_s = to_tensor(p_local) if p_local is not None else None
+        if self.p_s is not None:
+            mask_np = np.isfinite(p_local).astype(np.bool_)
+            self._p_mask = torch.tensor(mask_np, device=self.device)
+        else:
+            self._p_mask = None
+
+        self.supervision_has_data = self.supervision_total_points > 0
+        self.supervision_enabled = self.supervision_has_data and self.alpha_s != 0.0
+
+    def set_supervised_loss_weight(self, weight: float):
+        self.alpha_s = float(weight)
+        self.supervision_enabled = self.supervision_has_data and self.alpha_s != 0.0
 
     def set_optimizers(self, opt):
         self.opt = opt
@@ -209,15 +298,30 @@ class PysicsInformedNeuralNetwork:
         e = ee[:, 0:1]
         self.evm = e
 
-        u_x, u_y = self.autograd(u, [x,y])
-        u_xx = self.autograd(u_x, [x])[0]
-        u_yy = self.autograd(u_y, [y])[0]
+        u_x_new, u_y_new = self.autograd(u, [x,y])
+        u_xx_new = self.autograd(u_x_new, [x])[0]
+        u_yy_new = self.autograd(u_y_new, [y])[0]
 
-        v_x, v_y = self.autograd(v, [x,y])
-        v_xx = self.autograd(v_x, [x])[0]
-        v_yy = self.autograd(v_y, [y])[0]
+        v_x_new, v_y_new = self.autograd(v, [x,y])
+        v_xx_new = self.autograd(v_x_new, [x])[0]
+        v_yy_new = self.autograd(v_y_new, [y])[0]
 
-        p_x, p_y = self.autograd(p, [x,y])
+        p_x_new, p_y_new = self.autograd(p, [x,y])
+
+        scale = getattr(self, 'coord_scale', 1.0)
+        scale_sq = getattr(self, 'coord_scale_sq', scale * scale)
+        u_x = u_x_new * scale
+        u_y = u_y_new * scale
+        u_xx = u_xx_new * scale_sq
+        u_yy = u_yy_new * scale_sq
+
+        v_x = v_x_new * scale
+        v_y = v_y_new * scale
+        v_xx = v_xx_new * scale_sq
+        v_yy = v_yy_new * scale_sq
+
+        p_x = p_x_new * scale
+        p_y = p_y_new * scale
 
         # Get the minum between (vis_t0, vis_t_mius(calculated with last step e))
         if self.vis_t_minus is not None:
@@ -280,11 +384,31 @@ class PysicsInformedNeuralNetwork:
         (self.eq1_pred, self.eq2_pred, self.eq3_pred, self.eq4_pred) = self.neural_net_equations(self.x_f, self.y_f)
     
         if loss_mode == 'MSE':
-                self.loss_eq1 = torch.mean(torch.square(self.eq1_pred.reshape([-1])))
-                self.loss_eq2 = torch.mean(torch.square(self.eq2_pred.reshape([-1])))
-                self.loss_eq3 = torch.mean(torch.square(self.eq3_pred.reshape([-1])))
-                self.loss_eq4 = torch.mean(torch.square(self.eq4_pred.reshape([-1])))
+                def weighted_mse(residual):
+                        res = residual.reshape([-1])
+                        if self.eq_weights is not None and res.numel() == self.eq_weights.numel():
+                                weight = torch.sqrt(self.eq_weights.view(-1))
+                                res = res * weight
+                        return torch.mean(torch.square(res))
+                self.loss_eq1 = weighted_mse(self.eq1_pred)
+                self.loss_eq2 = weighted_mse(self.eq2_pred)
+                self.loss_eq3 = weighted_mse(self.eq3_pred)
+                self.loss_eq4 = weighted_mse(self.eq4_pred)
                 self.loss_e = self.loss_eq1 + self.loss_eq2 + self.loss_eq3 + 0.1 * self.loss_eq4
+
+        self.loss_s = torch.tensor(0.0, device=self.device)
+        if self.supervision_enabled and self.x_s is not None and self.supervision_point_count > 0:
+                u_pred_s, v_pred_s, p_pred_s, _ = self.neural_net_u(self.x_s, self.y_s)
+                loss_u = torch.mean(torch.square(self.u_s.view(-1) - u_pred_s.view(-1)))
+                loss_v = torch.mean(torch.square(self.v_s.view(-1) - v_pred_s.view(-1)))
+                loss_p = torch.tensor(0.0, device=self.device)
+                if self.p_s is not None and self._p_mask is not None:
+                        mask = self._p_mask.view(-1)
+                        if torch.any(mask):
+                                p_targets = self.p_s.view(-1)[mask]
+                                p_preds = p_pred_s.view(-1)[mask]
+                                loss_p = torch.mean(torch.square(p_targets - p_preds))
+                self.loss_s = loss_u + loss_v + loss_p
 
         # 跨GPU聚合損失以獲得全局損失值
         if self.world_size > 1:
@@ -295,8 +419,11 @@ class PysicsInformedNeuralNetwork:
                 # 聚合方程損失
                 dist.all_reduce(self.loss_e, op=dist.ReduceOp.SUM)
                 self.loss_e /= self.world_size
+                if self.supervision_enabled:
+                        dist.all_reduce(self.loss_s, op=dist.ReduceOp.SUM)
+                        self.loss_s /= self.world_size
 
-        self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e
+        self.loss = self.alpha_b * self.loss_b + self.alpha_e * self.loss_e + self.alpha_s * self.loss_s
 
         return self.loss, [self.loss_e, self.loss_b]
 
@@ -424,6 +551,7 @@ class PysicsInformedNeuralNetwork:
         eq3 = self.loss_eq3.detach().cpu().item()
         eq4 = self.loss_eq4.detach().cpu().item()
         bc_loss = losses[1].detach().cpu().item()
+        sup_loss = self.loss_s.detach().cpu().item() if isinstance(self.loss_s, torch.Tensor) else float(self.loss_s)
 
         # 進度條
         width = getattr(self, 'progress_bar_width', 30)
@@ -468,6 +596,18 @@ class PysicsInformedNeuralNetwork:
         header = f"[{self.current_stage}] {epoch_id+1:>7d}/{num_epoch:<7d} {progress*100:6.2f}% |{bar}|"
         line_loss = (f"  損失: total={loss_total:.3e}  方程總={self.loss_e.detach().cpu().item():.3e}  邊界={bc_loss:.3e}\n"
                      f"        eq1={eq1:.2e} eq2={eq2:.2e} eq3={eq3:.2e} eq4(熵殘差)={eq4:.2e}")
+        sup_line = ''
+        if self.supervision_point_count > 0 and self.alpha_s != 0.0:
+            sup_line = (f"  監督: loss={sup_loss:.3e} α={self.alpha_s:.3g} "
+                        f"samples_total={self.supervision_total_points} local={self.supervision_point_count}")
+        sdf_line = ''
+        if self.eq_weights is not None:
+            try:
+                w = self.eq_weights.detach().cpu()
+                sdf_line = (f"  SDF : w[min]={w.min().item():.3f} w[max]={w.max().item():.3f} "
+                            f"w[mean]={w.mean().item():.3f}")
+            except Exception:
+                pass
         line_time = (f"  時間: 本階段={fmt_t(stage_elapsed)}  平均/epoch={stage_elapsed/(epoch_id+1):.2f}s  interval_it/s={interval_it_s:.2f}  平均it/s={avg_it_s:.2f}\n"
                      f"        剩餘預估={fmt_t(eta_sec)}  累積總時長={fmt_t(total_elapsed)}")
         line_gpu = (f"  GPU : mem={mem_alloc:.1f}MB/{mem_total:.0f}MB (res {mem_reserved:.1f}MB)  throughput={throughput:.1f} pts/s  lr={lr:.2e}")
@@ -475,6 +615,10 @@ class PysicsInformedNeuralNetwork:
 
         print(header)
         print(line_loss)
+        if sup_line:
+            print(sup_line)
+        if sdf_line:
+            print(sdf_line)
         print(line_time)
         print(line_gpu)
         print(line_phys)
@@ -490,6 +634,8 @@ class PysicsInformedNeuralNetwork:
                 self.tb_writer.add_scalar('loss/eq2', eq2, self.global_step)
                 self.tb_writer.add_scalar('loss/eq3', eq3, self.global_step)
                 self.tb_writer.add_scalar('loss/eq4_entropy', eq4, self.global_step)
+                if self.supervision_point_count > 0 and self.alpha_s != 0.0:
+                    self.tb_writer.add_scalar('loss/supervision', sup_loss, self.global_step)
                 self.tb_writer.add_scalar('physics/Re_eff', Re_eff, self.global_step)
                 self.tb_writer.add_scalar('physics/alpha_evm', self.alpha_evm, self.global_step)
                 self.tb_writer.add_scalar('perf/throughput_pts_per_s', throughput, self.global_step)
