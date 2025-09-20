@@ -12,12 +12,12 @@ network:
   hidden_size_1: 40
 training:
   N_f: 120000
-  sort_training_points: true
+  sort_training_points: false # 已證實關閉不影響訓練
   sdf_weighting:
-    enabled: false
+    enabled: true
     min_weight: 0.2
-    decay: 5.0
-  coordinate_transform: true
+    decay: 5.0                # 注意開啟coordinate transform的時候，若要保持衰減速度，請將decay coefficient等比例縮減
+  coordinate_transform: false
   training_stages:
     - {alpha: 0.05, epochs: 500000, lr: 1.0e-3, name: "Stage 1"}
     - {alpha: 0.03, epochs: 500000, lr: 2.0e-4, name: "Stage 2"}
